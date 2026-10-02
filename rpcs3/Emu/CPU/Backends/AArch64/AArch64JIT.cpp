@@ -248,17 +248,20 @@ namespace aarch64
         }
 
         const auto this_name = f.getName().str();
-        if (m_visited_functions.find(this_name) != m_visited_functions.end())
+
+        // Mark the function object itself instead of remembering its name. The pass instance lives as long as the
+        // recompiler, and SPU programs are routinely recompiled under the same name (same code and entry point) by
+        // the same thread. Skipping those by name left them without any of the fixups below: a "bl <dispatch>; ret"
+        // with a stale x30 that returns to itself forever, e.g. when the LS code check fails after a job swap.
+        static constexpr const char* processed_attr = "rpcs3-ghc-frame-processed";
+        if (f.hasFnAttribute(processed_attr))
         {
             // Already processed. Only useful when recursing which is currently not used.
             DPRINT("Function %s was already processed. Skipping.\n", this_name.c_str());
             return;
         }
 
-        if (this_name != "__spu-null") // This name is meaningless and doesn't uniquely identify a function
-        {
-            m_visited_functions.insert(this_name);
-        }
+        f.addFnAttr(processed_attr);
 
         if (m_config.exclusion_callback && m_config.exclusion_callback(this_name))
         {
