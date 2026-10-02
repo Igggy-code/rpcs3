@@ -522,6 +522,13 @@ namespace vm
 }
 
 void do_cell_atomic_128_store(u32 addr, const void* to_write);
+// SPURS stall diagnostics (SPURSDebug.cpp)
+extern atomic_t<u32> g_spurs_dbg_flag_line;
+extern atomic_t<u32> g_spurs_dbg_flag_addr;
+void spurs_debug_set_spurs(u32 spurs_addr);
+void spurs_debug_record(u32 kind, u32 who, u32 pc, u32 v0, u32 v1, u32 v2);
+void spurs_debug_on_write(u32 kind, u32 who, u32 pc, u32 addr, u32 len, const void* src, u32 snapshot_flag);
+
 
 extern thread_local u64 g_tls_fault_spu;
 
@@ -1538,6 +1545,7 @@ void spu_thread::cpu_task()
 			{
 				spurs_addr = arg;
 				group->spurs_running++;
+				spurs_debug_set_spurs(arg);
 			}
 			else
 			{
@@ -2060,6 +2068,11 @@ void spu_thread::do_dma_transfer(spu_thread* _this, const spu_mfc_cmd& args, u8*
 
 	u32 eal = args.eal;
 	u32 lsa = args.lsa & 0x3ffff;
+
+	if (!is_get && (eal & -128) == g_spurs_dbg_flag_line)
+	{
+		spurs_debug_on_write(3, _this ? _this->index : 0xff, _this ? _this->pc : 0, eal, args.size, ls + lsa, 0);
+	}
 
 	// Keep src point to const
 	u8* dst = nullptr;
@@ -3410,6 +3423,8 @@ bool spu_thread::do_putllc(const spu_mfc_cmd& args)
 
 	// Store conditionally
 	const u32 addr = args.eal & -128;
+	const bool dbg_flag_line = addr == g_spurs_dbg_flag_line;
+	u32 dbg_mem_before = 0;
 
 	if ([&]()
 	{
@@ -3478,6 +3493,11 @@ bool spu_thread::do_putllc(const spu_mfc_cmd& args)
 			return false;
 		}
 
+		if (dbg_flag_line)
+		{
+			dbg_mem_before = vm::_ref<atomic_be_t<u32>>(g_spurs_dbg_flag_addr.load()).load();
+		}
+
 		if (!g_cfg.core.spu_accurate_reservations)
 		{
 			if (addr - spurs_addr <= 0x80)
@@ -3531,6 +3551,19 @@ bool spu_thread::do_putllc(const spu_mfc_cmd& args)
 		return success;
 	}())
 	{
+		if (dbg_flag_line)
+		{
+			const u32 off = g_spurs_dbg_flag_addr.load() - addr;
+			be_t<u32> snap{}, written{};
+			std::memcpy(&snap, rdata + off, 4);
+			std::memcpy(&written, _ptr<u8>(args.lsa & 0x3ff80) + off, 4);
+
+			if (snap != written || snap != dbg_mem_before)
+			{
+				spurs_debug_record(1, index, pc, snap, written, dbg_mem_before);
+			}
+		}
+
 		if (raddr)
 		{
 			if (raddr != spurs_addr || pc != 0x11e4)
@@ -3588,6 +3621,12 @@ bool spu_thread::do_putllc(const spu_mfc_cmd& args)
 void do_cell_atomic_128_store(u32 addr, const void* to_write)
 {
 	perf_meter<"STORE128"_u64> perf0;
+
+	if ((addr & -128) == g_spurs_dbg_flag_line)
+	{
+		const auto cpu0 = get_current_cpu_thread<spu_thread>();
+		spurs_debug_on_write(2, cpu0 ? cpu0->index : 0xff, cpu0 ? cpu0->pc : 0, addr & -128, 128, to_write, 0);
+	}
 
 	const auto cpu = get_current_cpu_thread();
 	rsx::reservation_lock rsx_lock(addr, 128);

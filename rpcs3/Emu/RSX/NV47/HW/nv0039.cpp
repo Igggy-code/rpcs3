@@ -9,6 +9,8 @@
 
 #include "context_accessors.define.h"
 
+void spurs_debug_on_rsx_write(u32 addr, u32 len);
+
 namespace rsx
 {
 	namespace nv0039
@@ -122,6 +124,12 @@ namespace rsx
 			});
 
 			auto res = ::rsx::reservation_lock<true>(write_address, write_length, read_address, read_length);
+
+			// SPURS stall diagnostics: report RSX copies that hit the SPURS workload flag (SPURSDebug.cpp)
+			utils::deferred_op dbg_deferred([&]()
+			{
+				spurs_debug_on_rsx_write(write_address, write_length);
+			});
 
 			u8* dst = vm::_ptr<u8>(write_address);
 			const u8* src = vm::_ptr<u8>(read_address);

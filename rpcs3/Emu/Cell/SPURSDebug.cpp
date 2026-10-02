@@ -13,14 +13,60 @@
 #include "Emu/Cell/PPUThread.h"
 #include "Emu/Cell/lv2/sys_spu.h"
 #include "Emu/Cell/Modules/cellSpurs.h"
+#include "Emu/Cell/timers.hpp"
 
 #include <set>
+#include <array>
 
 LOG_CHANNEL(spurs_dbg, "SPURSDBG");
+
+// Address of CellSpurs::wklFlag.flag of the first SPURS instance seen (0 = not yet known)
+atomic_t<u32> g_spurs_dbg_flag_addr{0};
+// 128-byte line containing it, read by JIT code (u32 for a cheap compare)
+atomic_t<u32> g_spurs_dbg_flag_line{umax};
 
 namespace
 {
 	constexpr u32 invalid_spurs = 0u - 0x80u;
+
+	enum dbg_kind : u32
+	{
+		dbg_spu_putllc = 1, // v0 = flag in reservation snapshot, v1 = flag written, v2 = flag in memory just before
+		dbg_spu_putlluc,    // v1 = flag written, v2 = flag in memory just before
+		dbg_spu_dma_put,    // v1 = flag written, v2 = flag in memory just before
+		dbg_rsx_nv0039,     // v1 = flag after the copy
+	};
+
+	struct dbg_event
+	{
+		u64 time;
+		u32 kind;
+		u32 who;
+		u32 pc;
+		u32 v0;
+		u32 v1;
+		u32 v2;
+	};
+
+	std::array<dbg_event, 1024> g_ring{};
+	atomic_t<u32> g_ring_pos{0};
+
+	constexpr const char* kind_name(u32 kind)
+	{
+		switch (kind)
+		{
+		case dbg_spu_putllc: return "SPU PUTLLC ";
+		case dbg_spu_putlluc: return "SPU PUTLLUC";
+		case dbg_spu_dma_put: return "SPU DMA PUT";
+		case dbg_rsx_nv0039: return "RSX NV0039 ";
+		default: return "?";
+		}
+	}
+
+	u32 read_flag(u32 addr)
+	{
+		return vm::check_addr(addr) ? +vm::_ref<atomic_be_t<u32>>(addr).load() : 0xdeadbeef;
+	}
 
 	u64 res_time(u32 addr)
 	{
@@ -78,6 +124,51 @@ namespace
 	}
 }
 
+void spurs_debug_set_spurs(u32 spurs_addr)
+{
+	if (g_spurs_dbg_flag_addr.compare_and_swap_test(0, spurs_addr + 0x6c))
+	{
+		g_spurs_dbg_flag_line = (spurs_addr + 0x6c) & -128;
+	}
+}
+
+void spurs_debug_record(u32 kind, u32 who, u32 pc, u32 v0, u32 v1, u32 v2)
+{
+	const u32 pos = g_ring_pos++ % g_ring.size();
+	g_ring[pos] = dbg_event{get_system_time(), kind, who, pc, v0, v1, v2};
+}
+
+// Writer hooks: [addr, addr + len) is about to be written from `src` (host pointer to the new bytes)
+void spurs_debug_on_write(u32 kind, u32 who, u32 pc, u32 addr, u32 len, const void* src, u32 snapshot_flag)
+{
+	const u32 flag = g_spurs_dbg_flag_addr;
+
+	if (!flag || flag - addr >= len || flag + 4 - addr > len)
+	{
+		return;
+	}
+
+	be_t<u32> new_val{};
+	std::memcpy(&new_val, static_cast<const u8*>(src) + (flag - addr), 4);
+	spurs_debug_record(kind, who, pc, snapshot_flag, new_val, read_flag(flag));
+}
+
+void spurs_debug_on_rsx_write(u32 addr, u32 len)
+{
+	const u32 flag = g_spurs_dbg_flag_addr;
+
+	if (flag && flag - addr < len)
+	{
+		spurs_debug_record(dbg_rsx_nv0039, 0, 0, 0, read_flag(flag), 0);
+	}
+}
+
+// Called from the SPU LLVM inline DMA path when a PUT targets the flag line
+void spurs_debug_on_inline_put(spu_thread* spu, u32 eal, u32 lsa, u32 size)
+{
+	spurs_debug_on_write(dbg_spu_dma_put, spu->index, spu->pc, eal, size, spu->ls + (lsa & 0x3ffff), 0);
+}
+
 void spurs_debug_dump(std::string_view reason)
 {
 	std::string out;
@@ -103,6 +194,23 @@ void spurs_debug_dump(std::string_view reason)
 	for (u32 addr : spurs_set)
 	{
 		dump_spurs(out, addr);
+	}
+
+	if (const u32 flag = g_spurs_dbg_flag_addr)
+	{
+		const u64 now = get_system_time();
+		const u32 end = g_ring_pos;
+		const u32 count = std::min<u32>(end, 96);
+
+		fmt::append(out, "  wklFlag 0x%x = 0x%08x; last %u flag events (t = ms before dump):\n", flag, read_flag(flag), count);
+
+		for (u32 i = end - count; i != end; i++)
+		{
+			const auto& e = g_ring[i % g_ring.size()];
+			fmt::append(out, "    %9.3f %s who=%u pc=0x%05x snapshot=0x%08x written=0x%08x mem_before=0x%08x%s\n",
+				(now - e.time) / 1000.0, kind_name(e.kind), e.who, e.pc, e.v0, e.v1, e.v2,
+				(e.kind == dbg_spu_putllc && e.v0 != e.v2) ? "  <-- snapshot differs from memory (lost update?)" : "");
+		}
 	}
 
 	spurs_dbg.error("\n%s", out);

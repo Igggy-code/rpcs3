@@ -18,6 +18,10 @@
 #include <thread>
 
 #include "util/v128.hpp"
+
+// SPURS stall diagnostics (SPURSDebug.cpp)
+extern atomic_t<u32> g_spurs_dbg_flag_line;
+void spurs_debug_on_inline_put(spu_thread* spu, u32 eal, u32 lsa, u32 size);
 #include "util/simd.hpp"
 #include "util/sysinfo.hpp"
 
@@ -5322,6 +5326,20 @@ public:
 					// (see spu_thread::do_dma_transfer). GET: acquire, PUT/SNDSIG: release.
 					m_ir->CreateFence((cmd & MFC_GET_CMD) ? llvm::AtomicOrdering::Acquire : llvm::AtomicOrdering::Release);
 #endif
+
+					if (!(cmd & MFC_GET_CMD))
+					{
+						// SPURS stall diagnostics: report PUTs to the SPURS workload flag line (SPURSDebug.cpp)
+						const auto dbg_line = m_ir->CreateLoad(get_type<u32>(), m_ir->CreateIntToPtr(m_ir->getInt64(reinterpret_cast<u64>(&g_spurs_dbg_flag_line)), get_type<u32*>()));
+						const auto dbg_hit = m_ir->CreateICmpEQ(m_ir->CreateAnd(eal.value, m_ir->getInt32(-128)), dbg_line);
+						const auto dbg_bb = llvm::BasicBlock::Create(m_context, "", m_function);
+						const auto dbg_next = llvm::BasicBlock::Create(m_context, "", m_function);
+						m_ir->CreateCondBr(dbg_hit, dbg_bb, dbg_next, m_md_unlikely);
+						m_ir->SetInsertPoint(dbg_bb);
+						call("spurs_debug_on_inline_put", &spurs_debug_on_inline_put, m_thread, eal.value, lsa.value, zext<u32>(size).eval(m_ir));
+						m_ir->CreateBr(dbg_next);
+						m_ir->SetInsertPoint(dbg_next);
+					}
 
 					llvm::Type* vtype = get_type<u8[16]>();
 
