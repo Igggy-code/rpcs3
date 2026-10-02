@@ -6,6 +6,8 @@
 
 #include "sys_tty.h"
 
+void spurs_debug_dump(std::string_view reason);
+
 #include <deque>
 #include <mutex>
 
@@ -121,6 +123,19 @@ error_code sys_tty_write([[maybe_unused]] ppu_thread& ppu, s32 ch, vm::cptr<char
 
 		return false;
 	};
+
+	// SPURS stall diagnostics: dump SPU/SPURS state when a game reports a lost SPU kick
+	if (msg.find("RsxKick: *** Timeout") != umax || msg.find("[SPU-PM] Error: Got too many flags") != umax)
+	{
+		static atomic_t<u64> s_last_dump = 0;
+		const u64 now = get_system_time();
+
+		if (now - s_last_dump.load() >= 2'000'000)
+		{
+			s_last_dump = now;
+			spurs_debug_dump(msg.substr(0, msg.find_first_of("\r\n")));
+		}
+	}
 
 	std::string_view sample = std::string_view(msg).substr(0, 1024);
 
