@@ -18,8 +18,10 @@
 #include "Emu/RSX/RSXThread.h"
 #include "Emu/System.h"
 #include "Utilities/File.h"
+#include "Utilities/StrUtil.h"
 
 #include <set>
+#include <any>
 #include <array>
 #include <map>
 #include <thread>
@@ -318,14 +320,21 @@ namespace
 
 		idm::select<named_thread<spu_thread>>([&](u32 /*id*/, spu_thread& spu)
 		{
-			if (spu.state & cpu_flag::wait)
+			const bool waiting = !!(spu.state & cpu_flag::wait);
+
+			fmt::append(out, "  %s SPU %s idx=%u pc=0x%05x srr0=0x%x ch_tag_mask=0x%x mfc_size=%u\n", waiting ? "Waiting" : "Running", spu.get_name(), spu.index, spu.pc, spu.srr0, spu.ch_tag_mask, spu.mfc_size);
+
+			// Channels, MFC queue, list stall state etc. (same text as the debugger's register view)
+			std::string misc;
+			std::any custom_data;
+			spu.dump_misc(misc, custom_data);
+
+			for (const std::string& line : fmt::split(misc, {"\n"}))
 			{
-				return;
+				fmt::append(out, "    | %s\n", line);
 			}
 
-			fmt::append(out, "  Running SPU %s idx=%u pc=0x%05x srr0=0x%x ch_tag_mask=0x%x mfc_size=%u\n", spu.get_name(), spu.index, spu.pc, spu.srr0, spu.ch_tag_mask, spu.mfc_size);
-
-			for (u32 i = 0; i < 128; i++)
+			for (u32 i = 0; i < 128 && !waiting; i++)
 			{
 				fmt::append(out, "%s r%-3u=%08x%08x%08x%08x", i % 4 ? "" : "\n   ", i, spu.gpr[i]._u32[3], spu.gpr[i]._u32[2], spu.gpr[i]._u32[1], spu.gpr[i]._u32[0]);
 			}
