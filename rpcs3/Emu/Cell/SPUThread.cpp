@@ -2043,6 +2043,21 @@ void spu_thread::do_dma_transfer(spu_thread* _this, const spu_mfc_cmd& args, u8*
 
 	const bool is_get = (args.cmd & ~(MFC_BARRIER_MASK | MFC_FENCE_MASK | MFC_START_MASK)) == MFC_GET_CMD;
 
+#if defined(ARCH_ARM64)
+	// MFC commands are executed in order, but the host memory accesses doing the copy are plain
+	// loads/stores. x86 (TSO) keeps them ordered for free; arm64 may reorder them with earlier
+	// accesses, e.g. a GET can observe data older than a preceding GETLLAR snapshot, or a PUT of a
+	// completion flag can become visible before the PUT of the data it guards.
+	if (is_get)
+	{
+		atomic_fence_acquire();
+	}
+	else
+	{
+		atomic_fence_release();
+	}
+#endif
+
 	u32 eal = args.eal;
 	u32 lsa = args.lsa & 0x3ffff;
 
@@ -2900,6 +2915,11 @@ bool spu_thread::do_list_transfer(spu_mfc_cmd& args)
 				{
 					// Execute the postponed byteswapping and masking
 					s_size = std::bit_cast<be_t<u32>>(s_size) & ts_mask;
+
+#if defined(ARCH_ARM64)
+					// Fast GET list path copies with plain loads (see do_dma_transfer)
+					atomic_fence_acquire();
+#endif
 
 					u8* src = vm::_ptr<u8>(0);
 					u8* dst = this->ls + arg_lsa;
@@ -4614,6 +4634,11 @@ bool spu_thread::process_mfc_cmd()
 
 		raddr = addr;
 		rtime = ntime;
+
+#if defined(ARCH_ARM64)
+		// Order the reservation snapshot before any later access (see do_dma_transfer)
+		atomic_fence_acquire();
+#endif
 		mov_rdata(_ref<spu_rdata_t>(ch_mfc_cmd.lsa & 0x3ff80), rdata);
 
 		ch_atomic_stat.set_value(MFC_GETLLAR_SUCCESS);

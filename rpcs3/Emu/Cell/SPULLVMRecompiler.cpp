@@ -5317,6 +5317,12 @@ public:
 					m_ir->CreateBr(next);
 					m_ir->SetInsertPoint(copy);
 
+#if defined(ARCH_ARM64)
+					// Inline DMA is plain host loads/stores: keep MFC ordering on weakly ordered hosts
+					// (see spu_thread::do_dma_transfer). GET: acquire, PUT/SNDSIG: release.
+					m_ir->CreateFence((cmd & MFC_GET_CMD) ? llvm::AtomicOrdering::Acquire : llvm::AtomicOrdering::Release);
+#endif
+
 					llvm::Type* vtype = get_type<u8[16]>();
 
 					switch (csize)
