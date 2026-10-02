@@ -4,6 +4,7 @@
 #include "Emu/RSX/RSXThread.h"
 #include "Emu/RSX/Core/RSXReservationLock.hpp"
 #include "Emu/RSX/Host/MM.h"
+#include "Emu/Memory/vm_reservation.h"
 
 #include "Utilities/deferred_op.hpp"
 
@@ -129,6 +130,27 @@ namespace rsx
 			utils::deferred_op dbg_deferred([&]()
 			{
 				spurs_debug_on_rsx_write(write_address, write_length);
+			});
+
+			// Plain RSX stores don't advance the SPU reservation time of the lines they touch, so wake
+			// up SPUs sleeping on those reservations (e.g. idle SPURS kernels waiting for CellSpurs::wklFlag)
+			// instead of letting them notice the new data only on their wait timeout.
+			utils::deferred_op notify_deferred([&]()
+			{
+				if (write_address >= rsx::constants::local_mem_base || write_length > 4096)
+				{
+					return;
+				}
+
+				std::atomic_thread_fence(std::memory_order_seq_cst);
+
+				for (u32 line = write_address & -128; line < write_address + write_length; line += 128)
+				{
+					if (vm::check_addr(line))
+					{
+						vm::reservation_notifier_notify(line, vm::reservation_acquire(line) & -128);
+					}
+				}
 			});
 
 			u8* dst = vm::_ptr<u8>(write_address);

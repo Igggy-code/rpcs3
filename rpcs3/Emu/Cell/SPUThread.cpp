@@ -3502,7 +3502,32 @@ bool spu_thread::do_putllc(const spu_mfc_cmd& args)
 		{
 			if (addr - spurs_addr <= 0x80)
 			{
-				mov_rdata(*vm::_ptr<spu_rdata_t>(addr), to_write);
+				// The reservation lock only excludes other reservation writers. The RSX (NV0039 copies
+				// into IO-mapped main memory, e.g. CellSpurs::wklFlag) and other plain stores don't touch
+				// the reservation time, so the snapshot must still match memory, or this store would
+				// silently revert their update and the dependent workload would never be woken.
+				auto& mem = *vm::_ptr<spu_rdata_t>(addr);
+
+				if (!cmp_rdata(rdata, mem))
+				{
+					res += 0 - 64;
+					return false;
+				}
+
+				if (diff16_pos != umax)
+				{
+					// Single 16-byte chunk changed: replace it atomically against concurrent plain stores
+					if (!atomic_storage<u128>::compare_exchange(*cast_as(mem, diff16_pos), *cast_as(rdata, diff16_pos), *cast_as_const(to_write, diff16_pos)))
+					{
+						res += 0 - 64;
+						return false;
+					}
+				}
+				else
+				{
+					mov_rdata(mem, to_write);
+				}
+
 				res += 64;
 				return true;
 			}
