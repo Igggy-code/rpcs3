@@ -255,26 +255,6 @@ namespace utils
 	}
 #endif
 
-#if defined(ARCH_ARM64)
-	// arm64 analogue of x86 MONITORX/MWAITX on an arbitrary cache line: arm the
-	// exclusive monitor on `line`, re-check the wait condition, then WFE. The core
-	// wakes on any store to that line (which clears the monitor), on SEV, or on the
-	// generic-timer event stream, so a missed store costs at most one stream period.
-	template <typename F>
-	FORCE_INLINE void wait_on_cacheline_arm64(const void* line, F&& still_waiting)
-	{
-		u64 tmp;
-		__asm__ volatile("ldaxr %x0, %1" : "=r"(tmp) : "Q"(*static_cast<const volatile u64*>(line)) : "memory");
-
-		if (still_waiting())
-		{
-			__asm__ volatile("wfe" ::: "memory");
-		}
-
-		__asm__ volatile("clrex" ::: "memory");
-	}
-#endif
-
 	template <typename T, usz Align>
 #if defined(ARCH_X64) && !defined(_MSC_VER)
 	__attribute__((target("waitpkg,mwaitx")))
