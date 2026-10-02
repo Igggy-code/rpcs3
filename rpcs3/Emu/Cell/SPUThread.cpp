@@ -3425,6 +3425,7 @@ bool spu_thread::do_putllc(const spu_mfc_cmd& args)
 	const u32 addr = args.eal & -128;
 	const bool dbg_flag_line = addr == g_spurs_dbg_flag_line;
 	u32 dbg_mem_before = 0;
+	bool dbg_stored = false; // Only PUTLLCs that took the line lock really store anything
 
 	if ([&]()
 	{
@@ -3496,6 +3497,7 @@ bool spu_thread::do_putllc(const spu_mfc_cmd& args)
 		if (dbg_flag_line)
 		{
 			dbg_mem_before = vm::_ref<atomic_be_t<u32>>(g_spurs_dbg_flag_addr.load()).load();
+			dbg_stored = true;
 		}
 
 		if (!g_cfg.core.spu_accurate_reservations)
@@ -3576,7 +3578,7 @@ bool spu_thread::do_putllc(const spu_mfc_cmd& args)
 		return success;
 	}())
 	{
-		if (dbg_flag_line)
+		if (dbg_flag_line && dbg_stored)
 		{
 			const u32 off = g_spurs_dbg_flag_addr.load() - addr;
 			be_t<u32> snap{}, written{};

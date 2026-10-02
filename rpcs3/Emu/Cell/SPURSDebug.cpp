@@ -14,9 +14,15 @@
 #include "Emu/Cell/lv2/sys_spu.h"
 #include "Emu/Cell/Modules/cellSpurs.h"
 #include "Emu/Cell/timers.hpp"
+#include "Emu/Cell/lv2/sys_rsx.h"
+#include "Emu/RSX/RSXThread.h"
+#include "Emu/System.h"
 
 #include <set>
 #include <array>
+#include <map>
+#include <thread>
+#include <chrono>
 
 LOG_CHANNEL(spurs_dbg, "SPURSDBG");
 
@@ -124,12 +130,16 @@ namespace
 	}
 }
 
+static void spurs_debug_watchdog_start();
+
 void spurs_debug_set_spurs(u32 spurs_addr)
 {
 	if (g_spurs_dbg_flag_addr.compare_and_swap_test(0, spurs_addr + 0x6c))
 	{
 		g_spurs_dbg_flag_line = (spurs_addr + 0x6c) & -128;
 	}
+
+	spurs_debug_watchdog_start();
 }
 
 void spurs_debug_record(u32 kind, u32 who, u32 pc, u32 v0, u32 v1, u32 v2)
@@ -214,4 +224,151 @@ void spurs_debug_dump(std::string_view reason)
 	}
 
 	spurs_dbg.error("\n%s", out);
+}
+
+// Hang watchdog: when the game stops flipping for a few seconds while emulation is running,
+// dump what every guest thread is doing (PPU cia/lr, SPU pc, cpu flags; a few samples each to
+// show spin loops) plus the RSX FIFO position and the SPURS state. Fires once per stall.
+namespace
+{
+	void sample_threads(std::string& out)
+	{
+		struct samples
+		{
+			std::string name;
+			std::string state;
+			std::map<u32, u32> pcs; // pc -> hits
+			u32 lr = 0;
+		};
+
+		std::map<u32, samples> ppus, spus;
+
+		for (int i = 0; i < 20; i++)
+		{
+			idm::select<named_thread<ppu_thread>>([&](u32 id, ppu_thread& ppu)
+			{
+				auto& s = ppus[id];
+				if (s.name.empty()) s.name = ppu.get_name();
+				s.pcs[ppu.cia]++;
+				s.lr = static_cast<u32>(ppu.lr);
+				s.state = fmt::format("%s", ppu.state.load());
+			});
+
+			idm::select<named_thread<spu_thread>>([&](u32 id, spu_thread& spu)
+			{
+				auto& s = spus[id];
+				if (s.name.empty()) s.name = spu.get_name();
+				s.pcs[spu.pc]++;
+				s.state = fmt::format("%s", spu.state.load());
+			});
+
+			std::this_thread::sleep_for(std::chrono::milliseconds(5));
+		}
+
+		const auto print = [&](const char* kind, std::map<u32, samples>& m)
+		{
+			for (auto& [id, s] : m)
+			{
+				fmt::append(out, "  %s 0x%07x %s lr=0x%x state=[%s] pc:", kind, id, s.name, s.lr, s.state);
+
+				for (auto& [pc, n] : s.pcs)
+				{
+					fmt::append(out, " 0x%x(%u)", pc, n);
+				}
+
+				out += '\n';
+			}
+		};
+
+		print("PPU", ppus);
+		print("SPU", spus);
+	}
+
+	void dump_rsx(std::string& out)
+	{
+		const auto rsx = rsx::get_current_renderer();
+
+		if (!rsx || !rsx->ctrl)
+		{
+			out += "  RSX: not initialized\n";
+			return;
+		}
+
+		const u32 get = rsx->ctrl->get;
+		const u32 put = rsx->ctrl->put;
+		const u32 ref = rsx->ctrl->ref;
+		fmt::append(out, "  RSX: flips=%u get=0x%x put=0x%x ref=0x%x state=[%s]\n", rsx->int_flip_index, get, put, ref, rsx->state.load());
+
+		const u32 ea = rsx->iomap_table.get_addr(get);
+
+		if (ea != umax && vm::check_addr(ea & -16, vm::page_readable, 32))
+		{
+			fmt::append(out, "  RSX cmd @ get (ea 0x%x):", ea);
+
+			for (u32 i = 0; i < 8; i++)
+			{
+				fmt::append(out, " %08x", +vm::_ref<be_t<u32>>(ea + i * 4));
+			}
+
+			out += '\n';
+		}
+	}
+
+	void watchdog_loop()
+	{
+		u64 last_flips = umax;
+		u64 last_change = get_system_time();
+		bool fired = false;
+
+		while (true)
+		{
+			std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+			const auto rsx = rsx::get_current_renderer();
+
+			if (!Emu.IsRunning() || !rsx)
+			{
+				last_flips = umax;
+				last_change = get_system_time();
+				fired = false;
+				continue;
+			}
+
+			const u64 flips = rsx->int_flip_index;
+			const u64 now = get_system_time();
+
+			if (flips != last_flips)
+			{
+				last_flips = flips;
+				last_change = now;
+				fired = false;
+				continue;
+			}
+
+			if (fired || now - last_change < 4'000'000)
+			{
+				continue;
+			}
+
+			fired = true;
+
+			std::string out;
+			fmt::append(out, "==== Hang watchdog: no RSX flip for %.1f s ====\n", (now - last_change) / 1e6);
+			dump_rsx(out);
+			sample_threads(out);
+			spurs_dbg.error("\n%s", out);
+
+			spurs_debug_dump("hang watchdog");
+		}
+	}
+}
+
+static void spurs_debug_watchdog_start()
+{
+	static atomic_t<bool> started{false};
+
+	if (!started.exchange(true))
+	{
+		std::thread(watchdog_loop).detach();
+	}
 }
