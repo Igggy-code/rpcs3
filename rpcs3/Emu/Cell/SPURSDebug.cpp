@@ -314,7 +314,7 @@ namespace
 		}
 	}
 
-	void watchdog_loop()
+	[[noreturn]] void watchdog_loop()
 	{
 		u64 last_flips = umax;
 		u64 last_change = get_system_time();
