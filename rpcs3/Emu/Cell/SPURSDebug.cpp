@@ -17,6 +17,7 @@
 #include "Emu/Cell/lv2/sys_rsx.h"
 #include "Emu/RSX/RSXThread.h"
 #include "Emu/System.h"
+#include "Utilities/File.h"
 
 #include <set>
 #include <array>
@@ -284,6 +285,63 @@ namespace
 		print("SPU", spus);
 	}
 
+	// Registers (and, for SPUs, the whole local store) of guest threads that are running rather than waiting.
+	// A thread spinning in JIT code is what the hang watchdog is looking for.
+	void dump_running_threads(std::string& out)
+	{
+		idm::select<named_thread<ppu_thread>>([&](u32 id, ppu_thread& ppu)
+		{
+			if (ppu.state & cpu_flag::wait)
+			{
+				return;
+			}
+
+			fmt::append(out, "  Running PPU 0x%07x %s cia=0x%x lr=0x%x ctr=0x%x (gprs may be stale inside JIT code)\n   ", id, ppu.get_name(), ppu.cia, ppu.lr, ppu.ctr);
+
+			for (u32 i = 0; i < 32; i++)
+			{
+				fmt::append(out, " r%u=%x", i, ppu.gpr[i]);
+			}
+
+			out += '\n';
+
+			// Uncharted 2 main thread spin loop at 0x381478: waits until (*(*(*(r2 - 31164) - 32768)) >> 16) == 0
+			if (ppu.cia - 0x381468 < 0x40)
+			{
+				const u32 toc = static_cast<u32>(ppu.gpr[2]);
+				const u32 p1 = vm::check_addr(toc - 31164) ? +vm::_ref<be_t<u32>>(toc - 31164) : 0;
+				const u32 p2 = p1 && vm::check_addr(p1 - 32768) ? +vm::_ref<be_t<u32>>(p1 - 32768) : 0;
+				const u32 v = p2 && vm::check_addr(p2) ? +vm::_ref<be_t<u32>>(p2) : 0;
+				fmt::append(out, "    UC2 spin: toc=0x%x p1=0x%x lock=0x%x value=0x%08x (waits for value>>16 == 0)\n", toc, p1, p2, v);
+			}
+		});
+
+		idm::select<named_thread<spu_thread>>([&](u32 /*id*/, spu_thread& spu)
+		{
+			if (spu.state & cpu_flag::wait)
+			{
+				return;
+			}
+
+			fmt::append(out, "  Running SPU %s idx=%u pc=0x%05x srr0=0x%x ch_tag_mask=0x%x mfc_size=%u\n", spu.get_name(), spu.index, spu.pc, spu.srr0, spu.ch_tag_mask, spu.mfc_size);
+
+			for (u32 i = 0; i < 128; i++)
+			{
+				fmt::append(out, "%s r%-3u=%08x%08x%08x%08x", i % 4 ? "" : "\n   ", i, spu.gpr[i]._u32[3], spu.gpr[i]._u32[2], spu.gpr[i]._u32[1], spu.gpr[i]._u32[0]);
+			}
+
+			out += '\n';
+
+			const std::string path = fs::get_cache_dir() + fmt::format("spu%u_ls_%05x.bin", spu.index, spu.pc);
+
+			if (fs::file f{path, fs::rewrite})
+			{
+				f.write(spu.ls, SPU_LS_SIZE);
+				fmt::append(out, "    LS saved to %s\n", path);
+			}
+		});
+	}
+
 	void dump_rsx(std::string& out)
 	{
 		const auto rsx = rsx::get_current_renderer();
@@ -356,6 +414,7 @@ namespace
 			fmt::append(out, "==== Hang watchdog: no RSX flip for %.1f s ====\n", (now - last_change) / 1e6);
 			dump_rsx(out);
 			sample_threads(out);
+			dump_running_threads(out);
 			spurs_dbg.error("\n%s", out);
 
 			spurs_debug_dump("hang watchdog");
