@@ -8,11 +8,18 @@
 
 namespace mtl
 {
+	class texture;
 	struct presenter;
 
 	struct present_params
 	{
-		const void* pixels = nullptr; // Guest display buffer (big-endian A8R8G8B8), may be null (clear only)
+		// Source, either an RSX surface rendered by the Metal backend...
+		const texture* surface = nullptr;
+		std::uint32_t surface_width = 0;  // Region of the surface to show (top-left origin)
+		std::uint32_t surface_height = 0;
+
+		// ...or the guest display buffer in memory (big-endian A8R8G8B8)
+		const void* pixels = nullptr;
 		std::uint32_t width = 0;
 		std::uint32_t height = 0;
 		std::uint32_t pitch = 0;
@@ -26,13 +33,13 @@ namespace mtl
 		std::uint32_t viewport_height = 0;
 	};
 
-	// nsview: the NSView* of the game window (display_handle_t on macOS)
+	// nsview: the NSView* of the game window (display_handle_t on macOS). Requires mtl::init_device().
 	presenter* create_presenter(void* nsview, bool vsync, std::string& error);
 	void destroy_presenter(presenter* p);
 
-	const std::string& get_device_name(const presenter* p);
 	void set_vsync(presenter* p, bool vsync);
 
-	// Uploads the display buffer and presents it. Returns false if no drawable was available.
+	// Submits all pending RSX work, then draws the source into the next drawable and presents it.
+	// Returns false if no drawable was available.
 	bool present(presenter* p, const present_params& params);
 }
