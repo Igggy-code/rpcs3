@@ -9,6 +9,7 @@
 #include "Emu/RSX/Utils/color_utils.hpp"
 #include "Emu/RSX/Utils/rsx_utils.h"
 #include "Emu/system_config.h"
+#include "Emu/RSX/Program/SPIRVCommon.h"
 
 u64 MTLGSRender::get_cycles()
 {
@@ -39,6 +40,20 @@ void MTLGSRender::on_init_thread()
 
 	m_device_ready = true;
 
+	// Sampler descriptors are consulted by the program analysis; without a texture cache they stay neutral
+	for (auto& sampler : fs_sampler_state) sampler = std::make_unique<mtl::null_sampled_image>();
+	for (auto& sampler : vs_sampler_state) sampler = std::make_unique<mtl::null_sampled_image>();
+
+	if (mtl::shader_translation_available())
+	{
+		spirv::initialize_compiler_context();
+		m_prog_buffer = std::make_unique<MTLProgramBuffer>();
+	}
+	else
+	{
+		rsx_log.error("Metal: built without SPIRV-Cross, shaders cannot be translated");
+	}
+
 	if (!m_frame)
 	{
 		rsx_log.warning("Metal: no game window, presenting is disabled");
@@ -60,6 +75,12 @@ void MTLGSRender::on_exit()
 {
 	if (m_device_ready)
 	{
+		if (m_prog_buffer)
+		{
+			m_prog_buffer.reset();
+			spirv::finalize_compiler_context();
+		}
+
 		m_rtts.destroy();
 		mtl::destroy_presenter(std::exchange(m_presenter, nullptr));
 		mtl::shutdown_device();
@@ -69,8 +90,46 @@ void MTLGSRender::on_exit()
 	GSRender::on_exit();
 }
 
+void MTLGSRender::load_program()
+{
+	if (!m_prog_buffer)
+	{
+		return;
+	}
+
+	if (m_graphics_state & rsx::pipeline_state::invalidate_pipeline_bits)
+	{
+		get_current_fragment_program(fs_sampler_state);
+		ensure(current_fragment_program.valid);
+
+		get_current_vertex_program(vs_sampler_state);
+
+		m_graphics_state.clear(rsx::pipeline_state::invalidate_pipeline_bits);
+	}
+	else
+	{
+		return;
+	}
+
+	for (u32 i = 0; i < 4; ++i)
+	{
+		m_pipeline_properties.color_formats[i] = m_surface_info[i].pitch ? static_cast<u32>(m_surface_info[i].color_format) + 1 : 0;
+	}
+
+	m_pipeline_properties.depth_format = m_depth_surface_info.pitch ? static_cast<u32>(m_depth_surface_info.depth_format) + 1 : 0;
+
+	m_prog_buffer->get_graphics_pipeline(nullptr, current_vertex_program, current_fragment_program, m_pipeline_properties, false, false);
+}
+
 void MTLGSRender::end()
 {
+	if (!skip_current_frame && m_device_ready)
+	{
+		init_buffers(rsx::framebuffer_creation_context::context_draw);
+		analyse_current_rsx_pipeline();
+		load_program();
+	}
+
 	// No draw support yet: consume the draw like the Null renderer
 	execute_nop_draw();
 	rsx::thread::end();
@@ -372,6 +431,12 @@ void MTLGSRender::flip(const rsx::display_flip_info_t& info)
 	{
 		mtl::command_context cmd;
 		m_rtts.trim(cmd);
+
+		if (const u32 total = mtl::g_programs_ok + mtl::g_programs_failed; total != m_reported_programs)
+		{
+			m_reported_programs = total;
+			rsx_log.notice("Metal: shader programs translated: %u ok, %u failed", mtl::g_programs_ok.load(), mtl::g_programs_failed.load());
+		}
 	}
 
 	if (m_frame)

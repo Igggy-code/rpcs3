@@ -7,6 +7,7 @@
 
 #include "MTLDevice.h"
 #include "MTLDeviceInternal.h"
+#include "MTLShaderCompiler.h"
 
 #include <algorithm>
 #include <mutex>
@@ -281,6 +282,55 @@ namespace mtl
 			{
 				[cmd commit];
 			}
+		}
+	}
+
+	shader_function::~shader_function()
+	{
+		if (m_handle)
+		{
+			CFRelease(m_handle);
+			m_handle = nullptr;
+		}
+	}
+
+	bool shader_function::create(const std::string& msl, const std::string& entry, std::string& error)
+	{
+		if (!s_device)
+		{
+			error = "Metal device is not initialized";
+			return false;
+		}
+
+		@autoreleasepool
+		{
+			MTLCompileOptions* options = [MTLCompileOptions new];
+			options.languageVersion = MTLLanguageVersion2_4;
+
+			NSError* ns_error = nil;
+			id<MTLLibrary> library = [s_device newLibraryWithSource:@(msl.c_str()) options:options error:&ns_error];
+
+			if (!library)
+			{
+				error = ns_error ? ns_error.localizedDescription.UTF8String : "unknown error";
+				return false;
+			}
+
+			id<MTLFunction> function = [library newFunctionWithName:@(entry.c_str())];
+
+			if (!function)
+			{
+				error = "entry point '" + entry + "' not found";
+				return false;
+			}
+
+			if (m_handle)
+			{
+				CFRelease(m_handle);
+			}
+
+			m_handle = (__bridge_retained void*)function;
+			return true;
 		}
 	}
 }

@@ -17,6 +17,13 @@ namespace mtl
 	{
 	};
 
+	// Placeholder texture descriptor until the texture cache exists (program analysis dereferences these)
+	class null_sampled_image : public rsx::sampled_image_descriptor_base
+	{
+	public:
+		u32 encoded_component_map() const override { return 0; }
+	};
+
 	pixel_format surface_color_format_to_mtl(rsx::surface_color_format format);
 	pixel_format surface_depth_format_to_mtl(rsx::surface_depth_format2 format);
 

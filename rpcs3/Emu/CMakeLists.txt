@@ -101,10 +101,12 @@ endif()
 
 # Native Metal RSX backend (experimental, selected with Renderer: Metal)
 option(USE_METAL "Build the native Metal renderer (macOS only)" ON)
-if(APPLE AND USE_METAL)
+if(APPLE AND USE_METAL AND TARGET 3rdparty_vulkan)
     target_sources(rpcs3_emu PRIVATE
         RSX/Metal/MTLGSRender.cpp
+        RSX/Metal/MTLProgram.cpp
         RSX/Metal/MTLRenderTargets.cpp
+        RSX/Metal/MTLShaderCompiler.cpp
         RSX/Metal/MTLDevice.mm
         RSX/Metal/MTLPresenter.mm
     )
@@ -113,6 +115,19 @@ if(APPLE AND USE_METAL)
         SKIP_PRECOMPILE_HEADERS ON
     )
     target_compile_definitions(rpcs3_emu PUBLIC HAVE_METAL)
+
+    # SPIR-V -> MSL translation (brew install spirv-cross)
+    find_package(PkgConfig QUIET)
+    if(PKG_CONFIG_FOUND)
+        pkg_check_modules(SPIRV_CROSS_C QUIET IMPORTED_TARGET spirv-cross-c-shared)
+    endif()
+    if(SPIRV_CROSS_C_FOUND)
+        message(STATUS "Metal: using SPIRV-Cross ${SPIRV_CROSS_C_VERSION}")
+        target_link_libraries(rpcs3_emu PRIVATE PkgConfig::SPIRV_CROSS_C)
+        target_compile_definitions(rpcs3_emu PRIVATE HAVE_SPIRV_CROSS)
+    else()
+        message(WARNING "Metal: SPIRV-Cross not found (brew install spirv-cross); shader translation is disabled")
+    endif()
     target_link_libraries(rpcs3_emu PUBLIC "-framework Metal" "-framework QuartzCore" "-framework AppKit")
 endif()
 
