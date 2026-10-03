@@ -27,6 +27,7 @@ void fmt_class_string<video_renderer>::format(std::string& out, u64 arg)
 		case video_renderer::null: return "Null";
 		case video_renderer::opengl: return "OpenGL";
 		case video_renderer::vulkan: return "Vulkan";
+		case video_renderer::metal: return "Metal";
 		}
 
 		return unknown;

@@ -93,6 +93,9 @@ namespace rpcs3
 					case video_renderer::vulkan:
 						title_string += title_data.vulkan_adapter;
 						break;
+					case video_renderer::metal:
+						title_string += "Metal";
+						break;
 					}
 					break;
 				}

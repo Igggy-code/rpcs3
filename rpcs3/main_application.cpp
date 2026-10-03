@@ -90,6 +90,10 @@ main_application::main_application()
 		Emu.SetDefaultRenderer(video_renderer::opengl);
 	}
 
+#if defined(HAVE_METAL)
+	supported_renderers.insert(video_renderer::metal);
+#endif
+
 	Emu.SetSupportedRenderers(supported_renderers);
 }
 

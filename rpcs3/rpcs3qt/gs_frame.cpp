@@ -97,6 +97,9 @@ gs_frame::gs_frame(QScreen* screen, const QRect& geometry, const QIcon& appIcon,
 	// Needed for MoltenVK to work properly on MacOS
 	if (g_cfg.video.renderer == video_renderer::vulkan)
 		setSurfaceType(QSurface::VulkanSurface);
+	// The native Metal backend presents through the window's CAMetalLayer
+	else if (g_cfg.video.renderer == video_renderer::metal)
+		setSurfaceType(QSurface::MetalSurface);
 #endif
 
 	// NOTE: You cannot safely create a wayland window that has hidden initial status and perform any changes on the window while it is still hidden.

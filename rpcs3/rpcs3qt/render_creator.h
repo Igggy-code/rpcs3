@@ -36,5 +36,6 @@ public:
 	render_info Vulkan;
 	render_info OpenGL;
 	render_info NullRender;
+	render_info Metal;
 	std::vector<render_info*> renderers;
 };

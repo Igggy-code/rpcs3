@@ -99,6 +99,21 @@ if(APPLE)
     )
 endif()
 
+# Native Metal RSX backend (experimental, selected with Renderer: Metal)
+option(USE_METAL "Build the native Metal renderer (macOS only)" ON)
+if(APPLE AND USE_METAL)
+    target_sources(rpcs3_emu PRIVATE
+        RSX/Metal/MTLGSRender.cpp
+        RSX/Metal/MTLPresenter.mm
+    )
+    set_source_files_properties(RSX/Metal/MTLPresenter.mm PROPERTIES
+        COMPILE_OPTIONS "-fobjc-arc"
+        SKIP_PRECOMPILE_HEADERS ON
+    )
+    target_compile_definitions(rpcs3_emu PUBLIC HAVE_METAL)
+    target_link_libraries(rpcs3_emu PUBLIC "-framework Metal" "-framework QuartzCore" "-framework AppKit")
+endif()
+
 target_include_directories(rpcs3_emu PUBLIC "${CMAKE_SOURCE_DIR}")
 
 set_source_files_properties("../../Utilities/JITLLVM.cpp" "../../Utilities/JITASM.cpp" PROPERTIES
