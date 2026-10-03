@@ -74,7 +74,7 @@ namespace
 
 	u32 read_flag(u32 addr)
 	{
-		return vm::check_addr(addr) ? +vm::_ref<atomic_be_t<u32>>(addr).load() : 0xdeadbeef;
+		return vm::check_addr(addr) ? +vm::get_super_ptr<atomic_be_t<u32>>(addr)->load() : 0xdeadbeef;
 	}
 
 	u64 res_time(u32 addr)
@@ -96,7 +96,9 @@ namespace
 			return;
 		}
 
-		const auto& sp = vm::_ref<CellSpurs>(spurs_addr);
+		// The watchdog thread is not an emulator thread: read through the always-mapped super pointer,
+		// a fault on the regular mapping (e.g. pages locked by a reservation writer) would be fatal there
+		const auto& sp = *vm::get_super_ptr<CellSpurs>(spurs_addr);
 
 		fmt::append(out, "  CellSpurs 0x%x: line0 rtime=0x%x line1 rtime=0x%x\n", spurs_addr, res_time(spurs_addr), res_time(spurs_addr + 0x80));
 		fmt::append(out, "    spuIdling=0x%02x flags1=0x%02x nSpus=%u wklEnabled=0x%08x wklMskB=0x%08x wklSignal1=0x%04x wklSignal2=0x%04x\n",
@@ -311,9 +313,9 @@ namespace
 			if (ppu.cia - 0x381468 < 0x40)
 			{
 				const u32 toc = static_cast<u32>(ppu.gpr[2]);
-				const u32 p1 = vm::check_addr(toc - 31164) ? +vm::_ref<be_t<u32>>(toc - 31164) : 0;
-				const u32 p2 = p1 && vm::check_addr(p1 - 32768) ? +vm::_ref<be_t<u32>>(p1 - 32768) : 0;
-				const u32 v = p2 && vm::check_addr(p2) ? +vm::_ref<be_t<u32>>(p2) : 0;
+				const u32 p1 = vm::check_addr(toc - 31164) ? +*vm::get_super_ptr<be_t<u32>>(toc - 31164) : 0;
+				const u32 p2 = p1 && vm::check_addr(p1 - 32768) ? +*vm::get_super_ptr<be_t<u32>>(p1 - 32768) : 0;
+				const u32 v = p2 && vm::check_addr(p2) ? +*vm::get_super_ptr<be_t<u32>>(p2) : 0;
 				fmt::append(out, "    UC2 spin: toc=0x%x p1=0x%x lock=0x%x value=0x%08x (waits for value>>16 == 0)\n", toc, p1, p2, v);
 			}
 		});
@@ -374,7 +376,7 @@ namespace
 
 			for (u32 i = 0; i < 8; i++)
 			{
-				fmt::append(out, " %08x", +vm::_ref<be_t<u32>>(ea + i * 4));
+				fmt::append(out, " %08x", +*vm::get_super_ptr<be_t<u32>>(ea + i * 4));
 			}
 
 			out += '\n';
