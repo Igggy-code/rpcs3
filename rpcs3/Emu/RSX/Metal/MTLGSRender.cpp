@@ -68,7 +68,7 @@ void MTLGSRender::on_init_thread()
 		return;
 	}
 
-	rsx_log.notice("Metal: using device '%s' (phase 2: render targets and clears, draws are skipped)", device_name);
+	rsx_log.notice("Metal: using device '%s' (phase 3a: render targets, clears and shader translation; draws are skipped)", device_name);
 }
 
 void MTLGSRender::on_exit()
