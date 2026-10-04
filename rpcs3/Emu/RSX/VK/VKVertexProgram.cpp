@@ -342,7 +342,8 @@ void VKVertexDecompilerThread::insertMainStart(std::stringstream& OS)
 	properties2.require_lit_emulation = properties.has_lit_op;
 	properties2.require_clip_plane_functions = true;
 	properties2.emulate_zclip_transform = true;
-	properties2.emulate_depth_clip_only = vk::g_render_device->get_shader_types_support().allow_float64;
+	// The Metal backend reuses this decompiler without a Vulkan device
+	properties2.emulate_depth_clip_only = vk::g_render_device && vk::g_render_device->get_shader_types_support().allow_float64;
 	properties2.low_precision_tests = vk::is_NVIDIA(vk::get_driver_vendor());
 	properties2.require_explicit_invariance = (vk::is_NVIDIA(vk::get_driver_vendor()) && g_cfg.video.shader_precision != gpu_preset_level::low);
 	properties2.require_instanced_render = !!(m_prog.ctrl & RSX_SHADER_CONTROL_INSTANCED_CONSTANTS);
