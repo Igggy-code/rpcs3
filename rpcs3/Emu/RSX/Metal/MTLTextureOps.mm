@@ -763,6 +763,16 @@ namespace mtl
 		}
 	}
 
+	void prepare_texture_ops()
+	{
+		std::lock_guard lock(s_ops_lock);
+
+		for (const char* name : { "pack_d24s8", "unpack_d24s8", "pack_d16f", "unpack_d16f" })
+		{
+			get_compute_pipeline(name);
+		}
+	}
+
 	void shutdown_texture_ops()
 	{
 		std::lock_guard lock(s_ops_lock);

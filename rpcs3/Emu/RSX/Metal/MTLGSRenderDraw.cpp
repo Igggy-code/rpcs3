@@ -3,6 +3,7 @@
 
 #include "Emu/RSX/Common/BufferUtils.h"
 #include "Emu/RSX/rsx_methods.h"
+#include "Emu/system_config.h"
 #include "Emu/RSX/Utils/color_utils.hpp"
 #include "Emu/RSX/Utils/rsx_utils.h"
 
@@ -546,8 +547,13 @@ bool MTLGSRender::load_program()
 
 	fill_pipeline_properties();
 
+	// Async shader modes: unknown pipelines are built on worker threads and their draws are skipped meanwhile
+	// (there is no shader interpreter on Metal). Synchronous builds stall the RSX thread for tens of ms,
+	// long enough for games such as UC2 to time out waiting on RSX progress.
+	const bool compile_async = g_cfg.video.shadermode != shader_mode::recompiler;
+
 	const auto [pipeline, vp, fp] = m_prog_buffer->get_graphics_pipeline(
-		nullptr, current_vertex_program, current_fragment_program, m_pipeline_properties, false, false);
+		nullptr, current_vertex_program, current_fragment_program, m_pipeline_properties, compile_async, false);
 
 	m_pipeline = pipeline;
 	m_vertex_prog = vp;
@@ -1034,7 +1040,12 @@ void MTLGSRender::end()
 		return;
 	}
 
-	init_buffers(rsx::framebuffer_creation_context::context_draw);
+	mtl::stall_probe probe_draw("draw");
+
+	{
+		mtl::stall_probe probe("init_buffers");
+		init_buffers(rsx::framebuffer_creation_context::context_draw);
+	}
 
 	if (areau scissor; get_scissor(scissor, true))
 	{
@@ -1051,9 +1062,18 @@ void MTLGSRender::end()
 	analyse_current_rsx_pipeline();
 
 	// Texture descriptors feed the program analysis (format classes, texture parameters)
-	load_texture_env();
+	{
+		mtl::stall_probe probe("load_texture_env");
+		load_texture_env();
+	}
 
-	if (!load_program())
+	bool program_ready;
+	{
+		mtl::stall_probe probe("load_program");
+		program_ready = load_program();
+	}
+
+	if (!program_ready)
 	{
 		execute_nop_draw();
 		rsx::thread::end();
@@ -1072,21 +1092,28 @@ void MTLGSRender::end()
 	// Resolve inherited surface contents before rendering into them
 	mtl::command_context cmd;
 
-	if (auto ds = std::get<1>(m_rtts.m_bound_depth_stencil))
 	{
-		ds->write_barrier(cmd);
-	}
+		mtl::stall_probe probe("surface write barriers");
 
-	for (auto& rtt : m_rtts.m_bound_render_targets)
-	{
-		if (auto surface = std::get<1>(rtt))
+		if (auto ds = std::get<1>(m_rtts.m_bound_depth_stencil))
 		{
-			surface->write_barrier(cmd);
+			ds->write_barrier(cmd);
+		}
+
+		for (auto& rtt : m_rtts.m_bound_render_targets)
+		{
+			if (auto surface = std::get<1>(rtt))
+			{
+				surface->write_barrier(cmd);
+			}
 		}
 	}
 
 	// Bind textures after the barriers; temporary copies (cyclic references) are made here
-	bind_texture_env(env.vs_textures, env.fs_textures);
+	{
+		mtl::stall_probe probe("bind_texture_env");
+		bind_texture_env(env.vs_textures, env.fs_textures);
+	}
 
 	auto& draw_call = rsx::method_registers.current_draw_clause;
 	draw_call.begin();

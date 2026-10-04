@@ -48,12 +48,14 @@ void MTLGSRender::on_init_thread()
 
 	m_device_ready = true;
 
-	// Sampler descriptors are consulted by the program analysis; without a texture cache they stay neutral
 	// Sampler descriptors are consulted by the program analysis; they are filled by the texture cache
 	for (auto& sampler : fs_sampler_state) sampler = std::make_unique<mtl::texture_cache::sampled_image_descriptor>();
 	for (auto& sampler : vs_sampler_state) sampler = std::make_unique<mtl::texture_cache::sampled_image_descriptor>();
 
 	m_texture_cache.initialize();
+
+	// Build the transfer shaders now rather than in the middle of a frame
+	mtl::prepare_texture_ops();
 
 	if (mtl::shader_translation_available())
 	{
@@ -88,6 +90,7 @@ void MTLGSRender::on_exit()
 	{
 		if (m_prog_buffer)
 		{
+			mtl::shutdown_pipeline_compiler();
 			m_prog_buffer.reset();
 			spirv::finalize_compiler_context();
 		}
@@ -271,6 +274,7 @@ bool MTLGSRender::on_access_violation(u32 address, bool is_writing)
 		: (can_flush ? rsx::invalidation_cause::read : rsx::invalidation_cause::deferred_read);
 
 	mtl::command_context cmd;
+	mtl::stall_probe probe(can_flush ? "access violation (RSX thread flush)" : "access violation");
 	auto result = m_texture_cache.invalidate_address(cmd, address, cause);
 
 	if (result.invalidate_samplers)
@@ -335,6 +339,7 @@ void MTLGSRender::do_local_task(rsx::FIFO::state state)
 			if (q.processed.load()) continue;
 
 			mtl::command_context cmd;
+			mtl::stall_probe probe("flush request");
 			q.result = m_texture_cache.flush_all(cmd, q.section_data);
 			q.processed = true;
 		}
@@ -364,6 +369,8 @@ mtl::work_item& MTLGSRender::post_flush_request(u32 address, mtl::texture_cache:
 
 bool MTLGSRender::scaled_image_from_memory(const rsx::blit_src_info& src, const rsx::blit_dst_info& dst, bool interpolate)
 {
+	mtl::stall_probe probe("NV3089 blit");
+
 	if (!m_device_ready)
 	{
 		return false;
@@ -381,6 +388,8 @@ bool MTLGSRender::scaled_image_from_memory(const rsx::blit_src_info& src, const 
 
 void MTLGSRender::clear_surface(u32 arg)
 {
+	mtl::stall_probe probe("clear");
+
 	if (skip_current_frame || !m_device_ready) return;
 
 	// If stencil write mask is disabled, remove clear_stencil bit
@@ -527,6 +536,8 @@ mtl::render_target* MTLGSRender::get_present_surface(u32 address, u32 width, u32
 
 void MTLGSRender::flip(const rsx::display_flip_info_t& info)
 {
+	mtl::stall_probe probe("flip", 50'000);
+
 	if (m_presenter && m_frame && !info.skip_frame)
 	{
 		if (m_vsync_mode != g_cfg.video.vsync)

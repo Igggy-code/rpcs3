@@ -96,6 +96,9 @@ namespace mtl
 	// Cached id<MTLSamplerState>; owned by the device layer
 	void* get_sampler(const sampler_desc& desc);
 
+	// Compiles the transfer shaders up front (they are otherwise built on first use)
+	void prepare_texture_ops();
+
 	// Releases blit pipelines, samplers and staging resources
 	void shutdown_texture_ops();
 }

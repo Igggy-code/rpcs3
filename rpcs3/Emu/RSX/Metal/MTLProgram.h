@@ -7,24 +7,49 @@
 #include "Emu/RSX/VK/VKVertexProgram.h"
 #include "Emu/RSX/VK/VKFragmentProgram.h"
 
+#include <functional>
+#include <memory>
+#include <mutex>
+
 namespace mtl
 {
 	// Translation statistics (vertex + fragment programs)
 	extern atomic_t<u32> g_programs_ok;
 	extern atomic_t<u32> g_programs_failed;
 
-	// Result of translating one RSX program: GLSL (from the Vulkan decompiler) -> SPIR-V -> MSL -> MTLFunction
+	// Metal library compiled on first use (possibly on a pipeline compiler thread)
+	struct lazy_function
+	{
+		std::mutex lock;
+		shader_function function;
+		std::string error;
+		bool attempted = false;
+	};
+
+	// Result of translating one RSX program: GLSL (from the Vulkan decompiler) -> SPIR-V -> MSL.
+	// The MSL -> MTLFunction step is the expensive one; it runs when a pipeline is first built.
 	struct translated_program
 	{
+		u32 id = 0;
+		bool is_vertex = false;
 		std::string glsl;
 		std::string msl;
 		std::string entry;
 		std::string error;     // Empty on success
-		shader_function function;
+		std::shared_ptr<lazy_function> compiled = std::make_shared<lazy_function>();
 		std::vector<shader_resource> resources;
 
-		bool ok() const { return error.empty() && function.valid(); }
+		bool ok() const { return error.empty() && !msl.empty(); }
+
+		// Thread-safe; returns nullptr if the MSL does not compile (logged once)
+		const shader_function* get_function() const;
 	};
+
+	// Background pipeline compilation (async shader modes)
+	void post_pipeline_job(std::function<void()> job);
+
+	// Drops queued jobs and waits for running ones; call before destroying the program cache
+	void shutdown_pipeline_compiler();
 
 	// Pipeline state that selects a Metal render pipeline
 	using pipeline_props = render_pipeline_state;
@@ -92,11 +117,23 @@ struct MTLProgramTraits
 		const vertex_program_type& vertexProgramData,
 		const fragment_program_type& fragmentProgramData,
 		const mtl::pipeline_props& pipelineProperties,
-		bool /*compile_async*/,
+		bool compile_async,
 		std::function<pipeline_type*(pipeline_storage_type&)> callback)
 	{
-		auto result = mtl::create_pipeline(vertexProgramData.result, fragmentProgramData.result, pipelineProperties);
-		return callback(result);
+		if (!compile_async)
+		{
+			auto result = mtl::create_pipeline(vertexProgramData.result, fragmentProgramData.result, pipelineProperties);
+			return callback(result);
+		}
+
+		// The program objects live in the cache until shutdown_pipeline_compiler() has drained the queue
+		mtl::post_pipeline_job([&vertexProgramData, &fragmentProgramData, pipelineProperties, callback = std::move(callback)]()
+		{
+			auto result = mtl::create_pipeline(vertexProgramData.result, fragmentProgramData.result, pipelineProperties);
+			callback(result);
+		});
+
+		return nullptr;
 	}
 };
 

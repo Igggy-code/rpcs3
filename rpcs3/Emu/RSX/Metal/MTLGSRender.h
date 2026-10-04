@@ -5,11 +5,31 @@
 #include "MTLProgram.h"
 #include "MTLTextureCache.h"
 
+#include "Emu/Cell/timers.hpp"
+
 #include <list>
 
 namespace mtl
 {
 	struct presenter;
+
+	// Logs RSX-thread operations that take long enough to stall the guest (diagnostics)
+	struct stall_probe
+	{
+		const char* what;
+		u64 threshold_us;
+		u64 start = get_system_time();
+
+		explicit stall_probe(const char* what, u64 threshold_us = 15'000) : what(what), threshold_us(threshold_us) {}
+
+		~stall_probe()
+		{
+			if (const u64 elapsed = get_system_time() - start; elapsed >= threshold_us)
+			{
+				rsx_log.warning("Metal: slow %s: %llu ms", what, elapsed / 1000);
+			}
+		}
+	};
 
 	// Texture cache flush requested by another thread, executed on the RSX thread
 	struct work_item
