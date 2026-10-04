@@ -20,6 +20,11 @@ namespace
 	id<MTLCommandQueue> s_queue = nil;
 	id<MTLCommandBuffer> s_pending = nil;
 
+	// Open render pass for draws and its attachments
+	id<MTLRenderCommandEncoder> s_encoder = nil;
+	id<MTLTexture> s_encoder_color[4] = {};
+	id<MTLTexture> s_encoder_depth = nil;
+
 	MTLPixelFormat to_mtl(mtl::pixel_format format)
 	{
 		switch (format)
@@ -50,6 +55,11 @@ namespace
 
 namespace mtl::internal
 {
+	MTLPixelFormat to_mtl_format(mtl::pixel_format format)
+	{
+		return to_mtl(format);
+	}
+
 	id<MTLDevice> device()
 	{
 		return s_device;
@@ -73,9 +83,81 @@ namespace mtl::internal
 		return s_pending;
 	}
 
+	void close_render_pass()
+	{
+		std::lock_guard lock(s_lock);
+
+		if (s_encoder)
+		{
+			[s_encoder endEncoding];
+			s_encoder = nil;
+		}
+
+		for (auto& tex : s_encoder_color) tex = nil;
+		s_encoder_depth = nil;
+	}
+
+	id<MTLRenderCommandEncoder> render_encoder(__unsafe_unretained const id<MTLTexture>* color, id<MTLTexture> depth, bool has_stencil, bool& is_new)
+	{
+		std::lock_guard lock(s_lock);
+
+		is_new = false;
+
+		if (s_encoder)
+		{
+			bool same = s_encoder_depth == depth;
+			for (int i = 0; i < 4 && same; ++i)
+			{
+				same = s_encoder_color[i] == color[i];
+			}
+
+			if (same)
+			{
+				return s_encoder;
+			}
+
+			close_render_pass();
+		}
+
+		MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+
+		for (int i = 0; i < 4; ++i)
+		{
+			if (color[i])
+			{
+				pass.colorAttachments[i].texture = color[i];
+				pass.colorAttachments[i].loadAction = MTLLoadActionLoad;
+				pass.colorAttachments[i].storeAction = MTLStoreActionStore;
+			}
+
+			s_encoder_color[i] = color[i];
+		}
+
+		if (depth)
+		{
+			pass.depthAttachment.texture = depth;
+			pass.depthAttachment.loadAction = MTLLoadActionLoad;
+			pass.depthAttachment.storeAction = MTLStoreActionStore;
+
+			if (has_stencil)
+			{
+				pass.stencilAttachment.texture = depth;
+				pass.stencilAttachment.loadAction = MTLLoadActionLoad;
+				pass.stencilAttachment.storeAction = MTLStoreActionStore;
+			}
+		}
+
+		s_encoder_depth = depth;
+		s_encoder = [command_buffer() renderCommandEncoderWithDescriptor:pass];
+		s_encoder.label = @"RSX draws";
+		is_new = true;
+		return s_encoder;
+	}
+
 	id<MTLCommandBuffer> take_command_buffer()
 	{
 		std::lock_guard lock(s_lock);
+		close_render_pass();
 		id<MTLCommandBuffer> cmd = s_pending;
 		s_pending = nil;
 		return cmd;
@@ -127,6 +209,8 @@ namespace mtl
 
 		@autoreleasepool
 		{
+			internal::close_render_pass();
+
 			if (s_pending)
 			{
 				[s_pending commit];
@@ -201,6 +285,8 @@ namespace mtl
 			// TODO: masked and scissored clears need a draw-based clear; the load action clears the whole image
 			(void)write_mask;
 
+			internal::close_render_pass();
+
 			MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
 			pass.colorAttachments[0].texture = as_texture(dst);
 			pass.colorAttachments[0].loadAction = MTLLoadActionClear;
@@ -222,6 +308,8 @@ namespace mtl
 
 		@autoreleasepool
 		{
+			internal::close_render_pass();
+
 			MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
 			pass.depthAttachment.texture = as_texture(dst);
 			pass.depthAttachment.loadAction = clear_depth ? MTLLoadActionClear : MTLLoadActionLoad;
@@ -265,6 +353,8 @@ namespace mtl
 
 		@autoreleasepool
 		{
+			internal::close_render_pass();
+
 			id<MTLBlitCommandEncoder> blit = [internal::command_buffer() blitCommandEncoder];
 			[blit copyFromTexture:as_texture(src) sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(src_x, src_y, 0) sourceSize:MTLSizeMake(width, height, 1)
 				toTexture:as_texture(dst) destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(dst_x, dst_y, 0)];

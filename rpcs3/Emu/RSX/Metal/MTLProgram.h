@@ -1,6 +1,7 @@
 #pragma once
 
 #include "MTLShaderCompiler.h"
+#include "MTLDraw.h"
 
 #include "Emu/RSX/Program/ProgramStateCache.h"
 #include "Emu/RSX/VK/VKVertexProgram.h"
@@ -20,24 +21,22 @@ namespace mtl
 		std::string entry;
 		std::string error;     // Empty on success
 		shader_function function;
+		std::vector<shader_resource> resources;
 
 		bool ok() const { return error.empty() && function.valid(); }
 	};
 
-	// Pipeline state that selects a Metal render pipeline (grows with the draw implementation)
-	struct pipeline_props
-	{
-		u32 color_formats[4]{};
-		u32 depth_format = 0;
+	// Pipeline state that selects a Metal render pipeline
+	using pipeline_props = render_pipeline_state;
 
-		bool operator==(const pipeline_props& other) const = default;
-	};
-
-	// Opaque render pipeline (id<MTLRenderPipelineState>); placeholder until draws are implemented
 	struct pipeline
 	{
+		render_pipeline state;
 		bool valid = false;
 	};
+
+	// Creates the Metal pipeline for a program pair (logs failures)
+	std::unique_ptr<pipeline> create_pipeline(const translated_program& vp, const translated_program& fp, const pipeline_props& props);
 }
 
 // Reuses the Vulkan program objects as decompiler hosts: they own the binding tables the GLSL refers to.
@@ -92,12 +91,11 @@ struct MTLProgramTraits
 	static pipeline_type* build_pipeline(
 		const vertex_program_type& vertexProgramData,
 		const fragment_program_type& fragmentProgramData,
-		const mtl::pipeline_props& /*pipelineProperties*/,
+		const mtl::pipeline_props& pipelineProperties,
 		bool /*compile_async*/,
 		std::function<pipeline_type*(pipeline_storage_type&)> callback)
 	{
-		auto result = std::make_unique<mtl::pipeline>();
-		result->valid = vertexProgramData.result.ok() && fragmentProgramData.result.ok();
+		auto result = mtl::create_pipeline(vertexProgramData.result, fragmentProgramData.result, pipelineProperties);
 		return callback(result);
 	}
 };

@@ -8,6 +8,26 @@ namespace mtl
 {
 	atomic_t<u32> g_programs_ok{0};
 	atomic_t<u32> g_programs_failed{0};
+
+	std::unique_ptr<pipeline> create_pipeline(const translated_program& vp, const translated_program& fp, const pipeline_props& props)
+	{
+		auto result = std::make_unique<pipeline>();
+
+		if (!vp.ok() || !fp.ok())
+		{
+			return result;
+		}
+
+		std::string error;
+		if (!result->state.create(vp.function, fp.function, props, error))
+		{
+			rsx_log.error("Metal: render pipeline creation failed: %s", error);
+			return result;
+		}
+
+		result->valid = true;
+		return result;
+	}
 }
 
 namespace
@@ -30,7 +50,7 @@ namespace
 		{
 			out.error = "GLSL -> SPIR-V failed";
 		}
-		else if (!mtl::spirv_to_msl(spirv, stage, out.msl, out.entry, out.error))
+		else if (!mtl::spirv_to_msl(spirv, stage, out.msl, out.entry, out.resources, out.error))
 		{
 			// error filled by spirv_to_msl
 		}

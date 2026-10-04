@@ -11,10 +11,11 @@ namespace mtl
 
 // Native Metal RSX backend (macOS only, selected with Renderer: "Metal").
 //
-// Phase 3a: shaders are translated (RSX -> GLSL -> SPIR-V -> MSL) but draws are still skipped.
-// Phase 2: RSX render targets live in an rsx::surface_store of Metal textures; clears are executed,
-// draws are still skipped, and flips present the surface that backs the display buffer (falling back
-// to the guest memory contents). See the "Metal backend" project notes for the roadmap.
+// RSX render targets live in an rsx::surface_store of Metal textures; clears are executed and flips
+// present the surface that backs the display buffer (falling back to the guest memory contents).
+// Programs are translated RSX -> GLSL (Vulkan decompilers) -> SPIR-V -> MSL. Draws pull vertex data
+// from texel buffers like the Vulkan backend; textures are placeholders until the texture cache exists.
+// See the "Metal backend" project notes for the roadmap.
 class MTLGSRender : public GSRender
 {
 public:
@@ -37,8 +38,18 @@ private:
 	// Surface showing the display buffer at 'address', if the surface store has one
 	mtl::render_target* get_present_surface(u32 address, u32 width, u32 height, u32 pitch, u32& out_width, u32& out_height);
 
-	// Translates the current RSX programs to Metal (phase 3a: no draws yet, only shader translation)
-	void load_program();
+	// Draw path (MTLGSRenderDraw.cpp)
+	struct vertex_upload_info;
+	struct draw_env;
+
+	// Finds or builds the pipeline for the current programs and fixed-function state
+	bool load_program();
+	void fill_pipeline_properties();
+	// Uploads constants and per-draw state shared by all subdraws
+	bool upload_draw_env(draw_env& env);
+	bool upload_vertex_data(vertex_upload_info& info);
+	void emit_geometry(u32 sub_index, const draw_env& env);
+	void fill_fixed_function_state(mtl::draw_desc& desc);
 
 	mtl::presenter* m_presenter = nullptr;
 	bool m_device_ready = false;
@@ -47,4 +58,14 @@ private:
 	std::unique_ptr<MTLProgramBuffer> m_prog_buffer;
 	mtl::pipeline_props m_pipeline_properties{};
 	u32 m_reported_programs = 0;
+
+	mtl::pipeline* m_pipeline = nullptr;
+	const MTLVertexProgram* m_vertex_prog = nullptr;
+	const MTLFragmentProgram* m_fragment_prog = nullptr;
+
+	rsx::vertex_input_layout m_vertex_layout;
+	std::array<mtl::texture*, 4> m_color_attachments{};
+	areau m_scissor{};
+	u64 m_draws_submitted = 0;
+	u64 m_draws_reported = 0;
 };
