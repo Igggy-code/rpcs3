@@ -18,6 +18,12 @@ u64 MTLGSRender::get_cycles()
 
 MTLGSRender::MTLGSRender(utils::serial* ar) noexcept : GSRender(ar)
 {
+	// Apple GPUs interpolate varyings correctly; the manual barycentric path relies on
+	// pervertex inputs, which MSL does not support.
+	backend_config.supports_normalized_barycentrics = true;
+
+	// Metal always uses the first vertex as the provoking vertex; flat shading falls back to smooth
+	backend_config.supports_last_provoking_vertex = false;
 }
 
 MTLGSRender::~MTLGSRender()
