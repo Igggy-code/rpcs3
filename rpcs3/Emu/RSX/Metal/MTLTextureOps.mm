@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cstring>
 #include <mutex>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -20,6 +21,11 @@ namespace
 	using mtl::u8;
 	using mtl::u32;
 	using mtl::u64;
+
+	constexpr u32 utils_align(u32 value, u32 alignment)
+	{
+		return (value + alignment - 1) & ~(alignment - 1);
+	}
 
 	id<MTLTexture> as_mtl(const mtl::texture& tex)
 	{
@@ -82,6 +88,46 @@ struct depth_out
 	float depth [[depth(any)]];
 };
 
+// Typeless transfers through the guest representation of depth formats (see copy_typeless)
+struct conv_params
+{
+	uint count;
+	uint depth_float;
+};
+
+kernel void pack_d24s8(device uint* packed [[buffer(0)]], device const float* z [[buffer(1)]], device const uchar* s [[buffer(2)]],
+	constant conv_params& p [[buffer(3)]], uint i [[thread_position_in_grid]])
+{
+	if (i >= p.count) return;
+	const float d = z[i];
+	const uint d24 = p.depth_float != 0 ? ((as_type<uint>(d) >> 7) & 0xffffff) : uint(saturate(d) * 16777215.0f);
+	packed[i] = (d24 << 8) | uint(s[i]);
+}
+
+kernel void unpack_d24s8(device const uint* packed [[buffer(0)]], device float* z [[buffer(1)]], device uchar* s [[buffer(2)]],
+	constant conv_params& p [[buffer(3)]], uint i [[thread_position_in_grid]])
+{
+	if (i >= p.count) return;
+	const uint v = packed[i];
+	const uint d24 = v >> 8;
+	z[i] = p.depth_float != 0 ? as_type<float>(d24 << 7) : float(d24) / 16777215.0f;
+	s[i] = uchar(v & 0xff);
+}
+
+kernel void pack_d16f(device ushort* packed [[buffer(0)]], device const float* z [[buffer(1)]],
+	constant conv_params& p [[buffer(3)]], uint i [[thread_position_in_grid]])
+{
+	if (i >= p.count) return;
+	packed[i] = as_type<ushort>(half(z[i]));
+}
+
+kernel void unpack_d16f(device const ushort* packed [[buffer(0)]], device float* z [[buffer(1)]],
+	constant conv_params& p [[buffer(3)]], uint i [[thread_position_in_grid]])
+{
+	if (i >= p.count) return;
+	z[i] = float(as_type<half>(packed[i]));
+}
+
 fragment depth_out blit_depth_fs(vs_out in [[stage_in]], depth2d<float> tex [[texture(0)]], sampler smp [[sampler(0)]],
 	constant blit_params& params [[buffer(0)]])
 {
@@ -104,6 +150,7 @@ fragment depth_out blit_depth_fs(vs_out in [[stage_in]], depth2d<float> tex [[te
 	id<MTLSamplerState> s_blit_linear = nil;
 	id<MTLSamplerState> s_blit_nearest = nil;
 	id<MTLDepthStencilState> s_depth_write_always = nil;
+	std::unordered_map<std::string, id<MTLComputePipelineState>> s_compute_pipelines;
 
 	struct sampler_hash
 	{
@@ -206,6 +253,59 @@ fragment depth_out blit_depth_fs(vs_out in [[stage_in]], depth2d<float> tex [[te
 		s_blit_pipelines[key] = pso;
 		return pso;
 	}
+
+	// Caller holds s_ops_lock
+	id<MTLComputePipelineState> get_compute_pipeline(const char* name)
+	{
+		if (auto found = s_compute_pipelines.find(name); found != s_compute_pipelines.end())
+		{
+			return found->second;
+		}
+
+		if (!ensure_blit_library())
+		{
+			return nil;
+		}
+
+		id<MTLFunction> function = [s_blit_library newFunctionWithName:@(name)];
+		NSError* error = nil;
+		id<MTLComputePipelineState> pso = function ? [mtl::internal::device() newComputePipelineStateWithFunction:function error:&error] : nil;
+		s_compute_pipelines[name] = pso;
+		return pso;
+	}
+
+	// How a format is laid out in guest memory relative to its host storage
+	enum class guest_layout
+	{
+		raw,   // Same bytes
+		d24s8, // depth32f_stencil8: packed (d24 << 8) | s8 words
+		d16f,  // depth32f: half floats
+	};
+
+	guest_layout get_guest_layout(mtl::pixel_format format)
+	{
+		switch (format)
+		{
+		case mtl::pixel_format::depth32f_stencil8: return guest_layout::d24s8;
+		case mtl::pixel_format::depth32f: return guest_layout::d16f;
+		default: return guest_layout::raw;
+		}
+	}
+
+	void dispatch_conversion(id<MTLComputeCommandEncoder> enc, id<MTLComputePipelineState> pso,
+		u32 packed_offset, u32 z_offset, u32 s_offset, u32 count, bool depth_float)
+	{
+		const struct { u32 count; u32 depth_float; } params{ count, depth_float ? 1u : 0u };
+
+		[enc setComputePipelineState:pso];
+		[enc setBuffer:mtl::internal::ring_buffer() offset:packed_offset atIndex:0];
+		[enc setBuffer:mtl::internal::ring_buffer() offset:z_offset atIndex:1];
+		[enc setBuffer:mtl::internal::ring_buffer() offset:s_offset atIndex:2];
+		[enc setBytes:&params length:sizeof(params) atIndex:3];
+
+		const NSUInteger group = std::min<NSUInteger>(pso.maxTotalThreadsPerThreadgroup, 256);
+		[enc dispatchThreads:MTLSizeMake(count, 1, 1) threadsPerThreadgroup:MTLSizeMake(group, 1, 1)];
+	}
 }
 
 namespace mtl
@@ -286,10 +386,21 @@ namespace mtl
 		}
 	}
 
-	bool copy_typeless(texture& src, u32 src_x, u32 src_y, u32 src_w, u32 height,
-		texture& dst, u32 dst_x, u32 dst_y, u32 dst_w)
+	u32 get_guest_texel_size(pixel_format format)
 	{
-		if (!src.valid() || !dst.valid() || src.is_depth() || dst.is_depth() ||
+		switch (format)
+		{
+		case pixel_format::depth32f_stencil8: return 4; // D24S8
+		case pixel_format::depth32f: return 2;          // Z16 float
+		default: return get_format_block_size(format);
+		}
+	}
+
+	bool copy_typeless(texture& src, u32 src_x, u32 src_y, u32 src_w, u32 height,
+		texture& dst, u32 dst_x, u32 dst_y, u32 dst_w, const typeless_options& options)
+	{
+		if (!src.valid() || !dst.valid() ||
+			src.format() == pixel_format::x32_stencil8 || dst.format() == pixel_format::x32_stencil8 ||
 			is_compressed_format(src.format()) || is_compressed_format(dst.format()))
 		{
 			return false;
@@ -299,14 +410,41 @@ namespace mtl
 		dst_w = std::min(dst_w, dst.width() - std::min(dst_x, dst.width()));
 		height = std::min({ height, src.height() - std::min(src_y, src.height()), dst.height() - std::min(dst_y, dst.height()) });
 
-		const u32 row_bytes = src_w * src.block_size();
-		if (!src_w || !dst_w || !height || dst_w * dst.block_size() != row_bytes)
+		const u32 row_bytes = src_w * get_guest_texel_size(src.format());
+		if (!src_w || !dst_w || !height || dst_w * get_guest_texel_size(dst.format()) != row_bytes)
 		{
 			return false;
 		}
 
-		const auto staging = ring_alloc(row_bytes * height, 256);
+		const guest_layout src_layout = get_guest_layout(src.format());
+		const guest_layout dst_layout = get_guest_layout(dst.format());
+
+		// Staging: [guest bytes][depth plane (f32)][stencil plane (u8)]
+		const u32 max_w = std::max(src_w, dst_w);
+		const u32 packed_size = utils_align(row_bytes * height, 256);
+		const u32 z_size = utils_align(max_w * height * 4, 256);
+		const u32 s_size = utils_align(max_w * height, 256);
+		const bool needs_planes = src_layout != guest_layout::raw || dst_layout != guest_layout::raw;
+
+		const auto staging = ring_alloc(packed_size + (needs_planes ? z_size + s_size : 0), 256);
 		if (!staging.ptr)
+		{
+			return false;
+		}
+
+		const u32 packed_offset = staging.offset;
+		const u32 z_offset = packed_offset + packed_size;
+		const u32 s_offset = z_offset + z_size;
+
+		std::lock_guard lock(s_ops_lock);
+
+		id<MTLComputePipelineState> pack = nil, unpack = nil;
+		if (src_layout != guest_layout::raw && !(pack = get_compute_pipeline(src_layout == guest_layout::d24s8 ? "pack_d24s8" : "pack_d16f")))
+		{
+			return false;
+		}
+
+		if (dst_layout != guest_layout::raw && !(unpack = get_compute_pipeline(dst_layout == guest_layout::d24s8 ? "unpack_d24s8" : "unpack_d16f")))
 		{
 			return false;
 		}
@@ -315,30 +453,84 @@ namespace mtl
 		{
 			internal::close_render_pass();
 
-			id<MTLBlitCommandEncoder> blit = [internal::command_buffer() blitCommandEncoder];
-			blit.label = @"RSX typeless copy";
+			id<MTLCommandBuffer> cb = internal::command_buffer();
+			id<MTLBuffer> ring = internal::ring_buffer();
 
-			[blit copyFromTexture:as_mtl(src)
-				sourceSlice:0
-				sourceLevel:0
-				sourceOrigin:MTLOriginMake(src_x, src_y, 0)
-				sourceSize:MTLSizeMake(src_w, height, 1)
-				toBuffer:internal::ring_buffer()
-				destinationOffset:staging.offset
-				destinationBytesPerRow:row_bytes
-				destinationBytesPerImage:0];
+			// 1. Source -> guest representation
+			{
+				id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+				blit.label = @"RSX typeless copy (read)";
 
-			[blit copyFromBuffer:internal::ring_buffer()
-				sourceOffset:staging.offset
-				sourceBytesPerRow:row_bytes
-				sourceBytesPerImage:0
-				sourceSize:MTLSizeMake(dst_w, height, 1)
-				toTexture:as_mtl(dst)
-				destinationSlice:0
-				destinationLevel:0
-				destinationOrigin:MTLOriginMake(dst_x, dst_y, 0)];
+				if (src_layout == guest_layout::raw)
+				{
+					[blit copyFromTexture:as_mtl(src) sourceSlice:0 sourceLevel:0
+						sourceOrigin:MTLOriginMake(src_x, src_y, 0) sourceSize:MTLSizeMake(src_w, height, 1)
+						toBuffer:ring destinationOffset:packed_offset destinationBytesPerRow:row_bytes destinationBytesPerImage:0];
+				}
+				else
+				{
+					[blit copyFromTexture:as_mtl(src) sourceSlice:0 sourceLevel:0
+						sourceOrigin:MTLOriginMake(src_x, src_y, 0) sourceSize:MTLSizeMake(src_w, height, 1)
+						toBuffer:ring destinationOffset:z_offset destinationBytesPerRow:src_w * 4 destinationBytesPerImage:0
+						options:blit_option(src, image_aspect::depth)];
 
-			[blit endEncoding];
+					if (src_layout == guest_layout::d24s8)
+					{
+						[blit copyFromTexture:as_mtl(src) sourceSlice:0 sourceLevel:0
+							sourceOrigin:MTLOriginMake(src_x, src_y, 0) sourceSize:MTLSizeMake(src_w, height, 1)
+							toBuffer:ring destinationOffset:s_offset destinationBytesPerRow:src_w destinationBytesPerImage:0
+							options:MTLBlitOptionStencilFromDepthStencil];
+					}
+				}
+
+				[blit endEncoding];
+			}
+
+			if (pack)
+			{
+				id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+				enc.label = @"RSX depth pack";
+				dispatch_conversion(enc, pack, packed_offset, z_offset, s_offset, src_w * height, options.src_depth_float);
+				[enc endEncoding];
+			}
+
+			if (unpack)
+			{
+				id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+				enc.label = @"RSX depth unpack";
+				dispatch_conversion(enc, unpack, packed_offset, z_offset, s_offset, dst_w * height, options.dst_depth_float);
+				[enc endEncoding];
+			}
+
+			// 2. Guest representation -> destination
+			{
+				id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+				blit.label = @"RSX typeless copy (write)";
+
+				if (dst_layout == guest_layout::raw)
+				{
+					[blit copyFromBuffer:ring sourceOffset:packed_offset sourceBytesPerRow:row_bytes sourceBytesPerImage:0
+						sourceSize:MTLSizeMake(dst_w, height, 1)
+						toTexture:as_mtl(dst) destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(dst_x, dst_y, 0)];
+				}
+				else
+				{
+					[blit copyFromBuffer:ring sourceOffset:z_offset sourceBytesPerRow:dst_w * 4 sourceBytesPerImage:0
+						sourceSize:MTLSizeMake(dst_w, height, 1)
+						toTexture:as_mtl(dst) destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(dst_x, dst_y, 0)
+						options:blit_option(dst, image_aspect::depth)];
+
+					if (dst_layout == guest_layout::d24s8)
+					{
+						[blit copyFromBuffer:ring sourceOffset:s_offset sourceBytesPerRow:dst_w sourceBytesPerImage:0
+							sourceSize:MTLSizeMake(dst_w, height, 1)
+							toTexture:as_mtl(dst) destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(dst_x, dst_y, 0)
+							options:MTLBlitOptionStencilFromDepthStencil];
+					}
+				}
+
+				[blit endEncoding];
+			}
 		}
 
 		return true;
@@ -577,6 +769,7 @@ namespace mtl
 
 		s_samplers.clear();
 		s_blit_pipelines.clear();
+		s_compute_pipelines.clear();
 		s_blit_library = nil;
 		s_blit_linear = nil;
 		s_blit_nearest = nil;

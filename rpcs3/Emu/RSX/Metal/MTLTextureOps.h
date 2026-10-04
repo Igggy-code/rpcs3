@@ -29,10 +29,21 @@ namespace mtl
 	void copy_texture(texture& src, u32 src_level, u32 src_layer, const region3d& src_region,
 		texture& dst, u32 dst_level, u32 dst_layer, u32 dst_x, u32 dst_y, u32 dst_z);
 
-	// Bit-cast copy between color formats of different texel sizes. The source rows (src_w texels) are
-	// reinterpreted as dst texels; dst_w * dst_bpp must equal src_w * src_bpp. Returns false if unsupported.
+	// Bytes per texel of a format as the guest sees it (depth32f_stencil8 holds D24S8, depth32f holds Z16 float)
+	u32 get_guest_texel_size(pixel_format format);
+
+	struct typeless_options
+	{
+		bool src_depth_float = false; // Depth holds RSX D24 float (RSX_FORMAT_CLASS_DEPTH24_FLOAT_X8_PACK32)
+		bool dst_depth_float = false;
+	};
+
+	// Bit-cast copy between formats, through the guest memory representation: the source rows (src_w texels)
+	// are reinterpreted as dst texels; dst_w * dst_guest_bpp must equal src_w * src_guest_bpp.
+	// Depth formats are converted like the guest sees them (D24S8 packed words, Z16 float halves).
+	// Returns false if unsupported.
 	bool copy_typeless(texture& src, u32 src_x, u32 src_y, u32 src_w, u32 height,
-		texture& dst, u32 dst_x, u32 dst_y, u32 dst_w);
+		texture& dst, u32 dst_x, u32 dst_y, u32 dst_w, const typeless_options& options = {});
 
 	// Draw-based scaled copy (filtering, flips, format conversion within the same aspect)
 	bool blit_texture(texture& src, u32 src_level, u32 src_layer, const blit_rect& src_rect,

@@ -670,8 +670,14 @@ namespace mtl
 
 	void texture_cache::copy_transfer_regions_impl(command_context&, texture* dst_image, const rsx::simple_array<copy_region_descriptor>& sources) const
 	{
-		const u32 dst_bpp = dst_image->block_size();
+		const u32 dst_bpp = get_guest_texel_size(dst_image->format());
 		std::unique_ptr<texture> tmp;
+
+		const auto is_depth_float = [](const texture* tex)
+		{
+			const auto image = dynamic_cast<const viewable_image*>(tex);
+			return image && image->format_class() == rsx::RSX_FORMAT_CLASS_DEPTH24_FLOAT_X8_PACK32;
+		};
 
 		for (const auto& slice : sources)
 		{
@@ -686,7 +692,7 @@ namespace mtl
 			u32 src_w = slice.src_w;
 			u32 src_h = slice.src_h;
 
-			const u32 src_bpp = slice.src->block_size();
+			const u32 src_bpp = get_guest_texel_size(slice.src->format());
 
 			if (slice.xform == rsx::surface_transform::coordinate_transform)
 			{
@@ -705,11 +711,11 @@ namespace mtl
 
 			if (slice.src->format() != dst_image->format())
 			{
-				if (slice.src->is_depth() || dst_image->is_depth())
+				const typeless_options options
 				{
-					rsx_log.todo("Metal: depth/color reinterpretation copy (fmt %d -> %d)", static_cast<int>(slice.src->format()), static_cast<int>(dst_image->format()));
-					continue;
-				}
+					.src_depth_float = is_depth_float(slice.src),
+					.dst_depth_float = is_depth_float(dst_image),
+				};
 
 				const u32 src_w2 = (src_w * src_bpp) / dst_bpp;
 				const u32 src_x2 = (src_x * src_bpp) / dst_bpp;
@@ -718,7 +724,10 @@ namespace mtl
 					dst_image->type() == texture_type::tex_2d)
 				{
 					// Bit-cast straight into the destination
-					copy_typeless(*slice.src, src_x, src_y, src_w, src_h, *dst_image, slice.dst_x, slice.dst_y, slice.dst_w);
+					if (!copy_typeless(*slice.src, src_x, src_y, src_w, src_h, *dst_image, slice.dst_x, slice.dst_y, slice.dst_w, options))
+					{
+						rsx_log.todo("Metal: unsupported typeless region copy (fmt %d -> %d)", static_cast<int>(slice.src->format()), static_cast<int>(dst_image->format()));
+					}
 					continue;
 				}
 
@@ -728,8 +737,9 @@ namespace mtl
 					tmp = std::make_unique<texture>(convert_w, slice.src->height(), dst_image->format(), usage_sampled | usage_render_target);
 				}
 
-				if (!copy_typeless(*slice.src, src_x, src_y, src_w, src_h, *tmp, src_x2, src_y, src_w2))
+				if (!copy_typeless(*slice.src, src_x, src_y, src_w, src_h, *tmp, src_x2, src_y, src_w2, options))
 				{
+					rsx_log.todo("Metal: unsupported typeless region copy (fmt %d -> %d)", static_cast<int>(slice.src->format()), static_cast<int>(dst_image->format()));
 					continue;
 				}
 

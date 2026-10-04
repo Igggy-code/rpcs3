@@ -113,16 +113,22 @@ namespace mtl
 				return;
 			}
 		}
-		else if (!src.is_depth() && !is_depth())
+		else
 		{
-			// Same memory viewed with another format: reinterpret the bytes. Rows keep their byte width.
-			const u32 src_bpp = src.block_size();
-			const u32 dst_bpp = block_size();
+			// Same memory viewed with another format: reinterpret the guest bytes. Rows keep their byte width.
+			const u32 src_bpp = get_guest_texel_size(src.format());
+			const u32 dst_bpp = get_guest_texel_size(format());
 			const u32 row_bytes = static_cast<u32>(src_area.width()) * src_bpp;
+
+			const typeless_options options
+			{
+				.src_depth_float = src.format_class() == rsx::RSX_FORMAT_CLASS_DEPTH24_FLOAT_X8_PACK32,
+				.dst_depth_float = format_class() == rsx::RSX_FORMAT_CLASS_DEPTH24_FLOAT_X8_PACK32,
+			};
 
 			if (src_area.height() == dst_area.height() && row_bytes % dst_bpp == 0 &&
 				copy_typeless(src, src_area.x1, src_area.y1, src_area.width(), src_area.height(),
-					*this, dst_area.x1, dst_area.y1, row_bytes / dst_bpp))
+					*this, dst_area.x1, dst_area.y1, row_bytes / dst_bpp, options))
 			{
 				return;
 			}

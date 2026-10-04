@@ -216,6 +216,49 @@ void MTLGSRender::init_buffers(rsx::framebuffer_creation_context context)
 
 		m_rtts.orphaned_surfaces.clear();
 	}
+
+	// Protect the bound surfaces so that guest reads of their memory flush the GPU contents
+	for (u8 i = 0; i < rsx::limits::color_buffers_count; ++i)
+	{
+		if (!m_surface_info[i].address || !m_surface_info[i].pitch) continue;
+
+		const auto surface_range = m_surface_info[i].get_memory_range();
+		if (g_cfg.video.write_color_buffers)
+		{
+			const auto surface = m_rtts.m_bound_render_targets[i].second;
+			m_texture_cache.lock_memory_region(
+				cmd, surface, surface_range, true,
+				m_surface_info[i].width, m_surface_info[i].height, m_surface_info[i].pitch,
+				static_cast<const mtl::render_target*>(surface));
+		}
+		else
+		{
+			m_texture_cache.commit_framebuffer_memory_region(cmd, surface_range);
+		}
+	}
+
+	if (m_depth_surface_info.address && m_depth_surface_info.pitch)
+	{
+		const auto surface_range = m_depth_surface_info.get_memory_range();
+		if (g_cfg.video.write_depth_buffer)
+		{
+			const auto surface = m_rtts.m_bound_depth_stencil.second;
+			m_texture_cache.lock_memory_region(
+				cmd, surface, surface_range, true,
+				m_depth_surface_info.width, m_depth_surface_info.height, m_depth_surface_info.pitch,
+				static_cast<const mtl::render_target*>(surface));
+		}
+		else
+		{
+			m_texture_cache.commit_framebuffer_memory_region(cmd, surface_range);
+		}
+	}
+
+	if (m_texture_cache.get_ro_tex_invalidate_intr())
+	{
+		// Invalidate cached sampler state
+		m_samplers_dirty.store(true);
+	}
 }
 
 bool MTLGSRender::on_access_violation(u32 address, bool is_writing)
