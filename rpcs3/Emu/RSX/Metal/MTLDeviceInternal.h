@@ -24,4 +24,7 @@ namespace mtl::internal
 	// every other command (clears, copies, presentation, flushes) closes it first.
 	id<MTLRenderCommandEncoder> render_encoder(__unsafe_unretained const id<MTLTexture>* color, id<MTLTexture> depth, bool has_stencil, bool& is_new);
 	void close_render_pass();
+
+	// Buffer behind mtl::ring_alloc (MTLDraw.mm)
+	id<MTLBuffer> ring_buffer();
 }

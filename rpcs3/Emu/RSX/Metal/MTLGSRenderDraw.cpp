@@ -166,7 +166,288 @@ struct MTLGSRender::draw_env
 	u32 texture_parameters = 0;
 	u32 stipple_pattern = 0;
 	u32 zero_block = 0;   // Zeroed block for push constants and unknown buffers
+
+	std::vector<mtl::resource_binding> vs_textures;
+	std::vector<mtl::resource_binding> fs_textures;
 };
+
+void MTLGSRender::load_texture_env()
+{
+	mtl::command_context cmd;
+	std::lock_guard lock(m_sampler_mutex);
+
+	using descriptor_t = mtl::texture_cache::sampled_image_descriptor;
+
+	for (u32 textures_ref = current_fp_metadata.referenced_textures_mask, i = 0; textures_ref; textures_ref >>= 1, ++i)
+	{
+		if (!(textures_ref & 1))
+		{
+			continue;
+		}
+
+		if (!fs_sampler_state[i])
+		{
+			fs_sampler_state[i] = std::make_unique<descriptor_t>();
+		}
+
+		auto sampler_state = static_cast<descriptor_t*>(fs_sampler_state[i].get());
+		const auto& tex = rsx::method_registers.fragment_textures[i];
+		const auto previous_format_class = sampler_state->format_class;
+
+		if (!m_samplers_dirty &&
+			!m_textures_dirty[i] &&
+			!m_texture_cache.test_if_descriptor_expired(cmd, m_rtts, sampler_state, tex))
+		{
+			continue;
+		}
+
+		const bool is_sampler_dirty = m_textures_dirty[i];
+		m_textures_dirty[i] = false;
+
+		if (!tex.enabled())
+		{
+			*sampler_state = {};
+			continue;
+		}
+
+		*sampler_state = m_texture_cache.upload_texture(cmd, tex, m_rtts);
+		if (!sampler_state->validate())
+		{
+			continue;
+		}
+
+		if (!is_sampler_dirty)
+		{
+			if (sampler_state->format_class != previous_format_class)
+			{
+				// Host details changed but RSX is not aware
+				m_graphics_state |= rsx::fragment_program_state_dirty;
+			}
+
+			if (sampler_state->format_ex && m_fs_samplers[i])
+			{
+				// Nothing to change, use the cached sampler
+				continue;
+			}
+		}
+
+		sampler_state->format_ex = tex.format_ex();
+
+		u32 actual_mipcount = 1;
+		if (sampler_state->upload_context == rsx::texture_upload_context::shader_read)
+		{
+			actual_mipcount = tex.get_exact_mipmap_count();
+		}
+		else if (sampler_state->external_subresource_desc.op != rsx::deferred_request_command::nop)
+		{
+			actual_mipcount = sampler_state->external_subresource_desc.exact_mip_count();
+		}
+
+		m_fs_samplers[i] = mtl::get_sampler(mtl::make_sampler_desc(tex, sampler_state, actual_mipcount));
+	}
+
+	for (u32 textures_ref = current_vp_metadata.referenced_textures_mask, i = 0; textures_ref; textures_ref >>= 1, ++i)
+	{
+		if (!(textures_ref & 1))
+		{
+			continue;
+		}
+
+		if (!vs_sampler_state[i])
+		{
+			vs_sampler_state[i] = std::make_unique<descriptor_t>();
+		}
+
+		auto sampler_state = static_cast<descriptor_t*>(vs_sampler_state[i].get());
+		const auto& tex = rsx::method_registers.vertex_textures[i];
+		const auto previous_format_class = sampler_state->format_class;
+
+		if (!m_samplers_dirty &&
+			!m_vertex_textures_dirty[i] &&
+			!m_texture_cache.test_if_descriptor_expired(cmd, m_rtts, sampler_state, tex))
+		{
+			continue;
+		}
+
+		const bool is_sampler_dirty = m_vertex_textures_dirty[i];
+		m_vertex_textures_dirty[i] = false;
+
+		if (!tex.enabled())
+		{
+			*sampler_state = {};
+			continue;
+		}
+
+		*sampler_state = m_texture_cache.upload_texture(cmd, tex, m_rtts);
+
+		if (!sampler_state->validate())
+		{
+			continue;
+		}
+
+		if (is_sampler_dirty || !m_vs_samplers[i])
+		{
+			m_vs_samplers[i] = mtl::get_sampler(mtl::make_sampler_desc(tex, sampler_state, 1));
+		}
+		else if (sampler_state->format_class != previous_format_class)
+		{
+			m_graphics_state |= rsx::vertex_program_state_dirty;
+		}
+	}
+
+	m_samplers_dirty.store(false);
+}
+
+namespace
+{
+	bool view_matches_declaration(const mtl::texture_view* view, const mtl::shader_resource& res)
+	{
+		const auto image = view->image();
+
+		mtl::texture_dimension dimension = mtl::texture_dimension::dim_2d;
+		switch (image->type())
+		{
+		case mtl::texture_type::tex_1d: dimension = mtl::texture_dimension::dim_1d; break;
+		case mtl::texture_type::tex_3d: dimension = mtl::texture_dimension::dim_3d; break;
+		case mtl::texture_type::tex_cube: dimension = mtl::texture_dimension::dim_cube; break;
+		default: break;
+		}
+
+		// 1D textures are declared as 2D by some decompiler paths and vice versa; Metal needs an exact match
+		if (dimension != res.dimension)
+		{
+			return false;
+		}
+
+		// Shadow samplers need depth images; stencil views need integer textures
+		if (res.depth && !image->is_depth())
+		{
+			return false;
+		}
+
+		return !res.multisampled;
+	}
+
+	// Parses "tex3", "tex3_stencil", "vtex1"
+	bool parse_texture_name(const std::string& name, std::string_view prefix, u32& index, bool& stencil)
+	{
+		if (!name.starts_with(prefix))
+		{
+			return false;
+		}
+
+		std::string_view rest = std::string_view(name).substr(prefix.size());
+		stencil = rest.ends_with("_stencil");
+		if (stencil)
+		{
+			rest.remove_suffix(8);
+		}
+
+		if (rest.empty() || rest.size() > 2 || !std::all_of(rest.begin(), rest.end(), [](char c) { return c >= '0' && c <= '9'; }))
+		{
+			return false;
+		}
+
+		index = static_cast<u32>(std::stoul(std::string(rest)));
+		return true;
+	}
+}
+
+void MTLGSRender::bind_texture_env(std::vector<mtl::resource_binding>& vs_textures, std::vector<mtl::resource_binding>& fs_textures)
+{
+	mtl::command_context cmd;
+	using descriptor_t = mtl::texture_cache::sampled_image_descriptor;
+
+	vs_textures.clear();
+	fs_textures.clear();
+
+	const auto resolve = [&](rsx::sampled_image_descriptor_base* base, bool enabled) -> mtl::texture_view*
+	{
+		auto sampler_state = static_cast<descriptor_t*>(base);
+		if (!enabled || !sampler_state || !sampler_state->validate())
+		{
+			return nullptr;
+		}
+
+		if (sampler_state->image_handle)
+		{
+			return sampler_state->image_handle;
+		}
+
+		return m_texture_cache.create_temporary_subresource(cmd, sampler_state->external_subresource_desc);
+	};
+
+	const auto make_binding = [](mtl::shader_stage stage, const mtl::shader_resource& res) -> mtl::resource_binding
+	{
+		mtl::resource_binding b{};
+		b.stage = stage;
+		b.source = mtl::binding_source::dummy_texture;
+		b.index = res.msl_index;
+		b.sampler = res.msl_sampler;
+		b.dimension = res.dimension;
+		b.depth = res.depth;
+		b.multisampled = res.multisampled;
+		return b;
+	};
+
+	for (const auto& res : m_fragment_prog->result.resources)
+	{
+		if (res.kind != mtl::resource_kind::texture)
+		{
+			continue;
+		}
+
+		auto b = make_binding(mtl::shader_stage::fragment, res);
+		u32 unit = 0;
+		bool stencil = false;
+
+		if (parse_texture_name(res.name, "tex", unit, stencil) && unit < rsx::limits::fragment_textures_count)
+		{
+			if (auto view = resolve(fs_sampler_state[unit].get(), rsx::method_registers.fragment_textures[unit].enabled()))
+			{
+				if (stencil)
+				{
+					auto image = static_cast<mtl::viewable_image*>(view->image());
+					view = mtl::has_stencil(image->format()) ? image->get_view(rsx::default_remap_vector, mtl::image_aspect::stencil) : nullptr;
+				}
+
+				if (view && (stencil || view_matches_declaration(view, res)))
+				{
+					b.source = mtl::binding_source::texture;
+					b.texture_handle = view->native();
+					b.sampler_handle = stencil ? nullptr : m_fs_samplers[unit];
+				}
+			}
+		}
+
+		fs_textures.push_back(b);
+	}
+
+	for (const auto& res : m_vertex_prog->result.resources)
+	{
+		if (res.kind != mtl::resource_kind::texture)
+		{
+			continue;
+		}
+
+		auto b = make_binding(mtl::shader_stage::vertex, res);
+		u32 unit = 0;
+		bool stencil = false;
+
+		if (parse_texture_name(res.name, "vtex", unit, stencil) && unit < rsx::limits::vertex_textures_count && !stencil)
+		{
+			if (auto view = resolve(vs_sampler_state[unit].get(), rsx::method_registers.vertex_textures[unit].enabled());
+				view && view_matches_declaration(view, res))
+			{
+				b.source = mtl::binding_source::texture;
+				b.texture_handle = view->native();
+				b.sampler_handle = m_vs_samplers[unit];
+			}
+		}
+
+		vs_textures.push_back(b);
+	}
+}
 
 void MTLGSRender::fill_pipeline_properties()
 {
@@ -684,12 +965,8 @@ void MTLGSRender::emit_draw(u32 sub_index, const draw_env& env)
 				break;
 
 			case mtl::resource_kind::texture:
-				b.source = mtl::binding_source::dummy_texture;
-				b.sampler = res.msl_sampler;
-				b.dimension = res.dimension;
-				b.depth = res.depth;
-				b.multisampled = res.multisampled;
-				break;
+				// Resolved once per draw call by bind_texture_env
+				continue;
 
 			case mtl::resource_kind::push_constant:
 				b.source = mtl::binding_source::ring_buffer;
@@ -724,6 +1001,9 @@ void MTLGSRender::emit_draw(u32 sub_index, const draw_env& env)
 
 	bind(mtl::shader_stage::vertex, m_vertex_prog->result.resources);
 	bind(mtl::shader_stage::fragment, m_fragment_prog->result.resources);
+
+	desc.bindings.insert(desc.bindings.end(), env.vs_textures.begin(), env.vs_textures.end());
+	desc.bindings.insert(desc.bindings.end(), env.fs_textures.begin(), env.fs_textures.end());
 
 	// Draw ranges
 	if (draw_call.is_single_draw())
@@ -770,6 +1050,9 @@ void MTLGSRender::end()
 
 	analyse_current_rsx_pipeline();
 
+	// Texture descriptors feed the program analysis (format classes, texture parameters)
+	load_texture_env();
+
 	if (!load_program())
 	{
 		execute_nop_draw();
@@ -802,6 +1085,9 @@ void MTLGSRender::end()
 		}
 	}
 
+	// Bind textures after the barriers; temporary copies (cyclic references) are made here
+	bind_texture_env(env.vs_textures, env.fs_textures);
+
 	auto& draw_call = rsx::method_registers.current_draw_clause;
 	draw_call.begin();
 
@@ -811,6 +1097,8 @@ void MTLGSRender::end()
 		emit_draw(sub_index++, env);
 	}
 	while (draw_call.next());
+
+	m_texture_cache.release_uncached_temporary_subresources();
 
 	m_rtts.on_write(m_framebuffer_layout.color_write_enabled, m_framebuffer_layout.zeta_write_enabled);
 

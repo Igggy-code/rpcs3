@@ -4,6 +4,7 @@
 
 #include "Emu/IdManager.h"
 #include "Emu/Memory/vm.h"
+#include "Emu/Memory/vm_locking.h"
 #include "Emu/RSX/gcm_enums.h"
 #include "Emu/RSX/rsx_methods.h"
 #include "Emu/RSX/Utils/color_utils.hpp"
@@ -48,8 +49,11 @@ void MTLGSRender::on_init_thread()
 	m_device_ready = true;
 
 	// Sampler descriptors are consulted by the program analysis; without a texture cache they stay neutral
-	for (auto& sampler : fs_sampler_state) sampler = std::make_unique<mtl::null_sampled_image>();
-	for (auto& sampler : vs_sampler_state) sampler = std::make_unique<mtl::null_sampled_image>();
+	// Sampler descriptors are consulted by the program analysis; they are filled by the texture cache
+	for (auto& sampler : fs_sampler_state) sampler = std::make_unique<mtl::texture_cache::sampled_image_descriptor>();
+	for (auto& sampler : vs_sampler_state) sampler = std::make_unique<mtl::texture_cache::sampled_image_descriptor>();
+
+	m_texture_cache.initialize();
 
 	if (mtl::shader_translation_available())
 	{
@@ -75,7 +79,7 @@ void MTLGSRender::on_init_thread()
 		return;
 	}
 
-	rsx_log.notice("Metal: using device '%s' (phase 3b: draws with placeholder textures)", device_name);
+	rsx_log.notice("Metal: using device '%s' (phase 4: draws with textures)", device_name);
 }
 
 void MTLGSRender::on_exit()
@@ -88,7 +92,9 @@ void MTLGSRender::on_exit()
 			spirv::finalize_compiler_context();
 		}
 
+		m_texture_cache.destroy();
 		m_rtts.destroy();
+		mtl::shutdown_texture_ops();
 		mtl::shutdown_draw_resources();
 		mtl::destroy_presenter(std::exchange(m_presenter, nullptr));
 		mtl::shutdown_device();
@@ -128,6 +134,13 @@ void MTLGSRender::init_buffers(rsx::framebuffer_creation_context context)
 
 	for (int i = 0; i < rsx::limits::color_buffers_count; ++i)
 	{
+		if (m_surface_info[i].pitch && g_cfg.video.write_color_buffers)
+		{
+			const utils::address_range32 surface_range = m_surface_info[i].get_memory_range();
+			m_texture_cache.set_memory_read_flags(surface_range, rsx::memory_read_flags::flush_once);
+			m_texture_cache.flush_if_cache_miss_likely(cmd, surface_range);
+		}
+
 		if (std::get<0>(m_rtts.m_bound_render_targets[i]))
 		{
 			m_surface_info[i].address = m_framebuffer_layout.color_addresses[i];
@@ -137,11 +150,19 @@ void MTLGSRender::init_buffers(rsx::framebuffer_creation_context context)
 			m_surface_info[i].color_format = m_framebuffer_layout.color_format;
 			m_surface_info[i].bpp = color_bpp;
 			m_surface_info[i].samples = samples;
+			m_texture_cache.notify_surface_changed(m_surface_info[i].get_memory_range(m_framebuffer_layout.aa_factors));
 		}
 		else
 		{
 			m_surface_info[i] = {};
 		}
+	}
+
+	if (m_depth_surface_info.pitch && g_cfg.video.write_depth_buffer)
+	{
+		const utils::address_range32 surface_range = m_depth_surface_info.get_memory_range();
+		m_texture_cache.set_memory_read_flags(surface_range, rsx::memory_read_flags::flush_once);
+		m_texture_cache.flush_if_cache_miss_likely(cmd, surface_range);
 	}
 
 	if (std::get<0>(m_rtts.m_bound_depth_stencil))
@@ -153,6 +174,7 @@ void MTLGSRender::init_buffers(rsx::framebuffer_creation_context context)
 		m_depth_surface_info.depth_format = m_framebuffer_layout.depth_format;
 		m_depth_surface_info.bpp = get_format_block_size_in_bytes(m_framebuffer_layout.depth_format);
 		m_depth_surface_info.samples = samples;
+		m_texture_cache.notify_surface_changed(m_depth_surface_info.get_memory_range(m_framebuffer_layout.aa_factors));
 	}
 	else
 	{
@@ -161,12 +183,157 @@ void MTLGSRender::init_buffers(rsx::framebuffer_creation_context context)
 
 	// There is no framebuffer object to build in Metal: attachments are bound per render pass
 	m_graphics_state.set(rsx::rtt_config_valid);
+
+	m_texture_cache.clear_ro_tex_invalidate_intr();
+
+	if (!m_rtts.superseded_surfaces.empty())
+	{
+		for (auto& surface : m_rtts.superseded_surfaces)
+		{
+			m_texture_cache.discard_framebuffer_memory_region(cmd, surface->get_memory_range());
+		}
+
+		m_rtts.superseded_surfaces.clear();
+	}
+
+	if (!m_rtts.orphaned_surfaces.empty())
+	{
+		for (auto& [base_addr, surface] : m_rtts.orphaned_surfaces)
+		{
+			const bool lock = surface->is_depth_surface() ? !!g_cfg.video.write_depth_buffer : !!g_cfg.video.write_color_buffers;
+
+			if (!lock || !surface->is_locked())
+			{
+				m_texture_cache.commit_framebuffer_memory_region(cmd, surface->get_memory_range());
+				continue;
+			}
+
+			m_texture_cache.lock_memory_region(
+				cmd, surface, surface->get_memory_range(), false,
+				surface->get_surface_width<rsx::surface_metrics::pixels>(), surface->get_surface_height<rsx::surface_metrics::pixels>(), surface->get_rsx_pitch(),
+				static_cast<const mtl::render_target*>(surface));
+		}
+
+		m_rtts.orphaned_surfaces.clear();
+	}
 }
 
-bool MTLGSRender::on_access_violation(u32 address, bool /*is_writing*/)
+bool MTLGSRender::on_access_violation(u32 address, bool is_writing)
 {
 	rsx::mm_flush(address);
-	return zcull_ctrl->on_access_violation(address);
+
+	const bool can_flush = is_current_thread();
+	const rsx::invalidation_cause cause = is_writing
+		? (can_flush ? rsx::invalidation_cause::write : rsx::invalidation_cause::deferred_write)
+		: (can_flush ? rsx::invalidation_cause::read : rsx::invalidation_cause::deferred_read);
+
+	mtl::command_context cmd;
+	auto result = m_texture_cache.invalidate_address(cmd, address, cause);
+
+	if (result.invalidate_samplers)
+	{
+		std::lock_guard lock(m_sampler_mutex);
+		m_samplers_dirty.store(true);
+	}
+
+	if (!result.violation_handled)
+	{
+		return zcull_ctrl->on_access_violation(address);
+	}
+
+	if (result.num_flushable > 0)
+	{
+		// GPU readbacks are recorded on the RSX thread
+		auto& task = post_flush_request(address, result);
+
+		m_eng_interrupt_mask |= rsx::backend_interrupt;
+		vm::temporary_unlock();
+		task.producer_wait();
+	}
+
+	return true;
+}
+
+void MTLGSRender::on_invalidate_memory_range(const utils::address_range32& range, rsx::invalidation_cause cause)
+{
+	mtl::command_context cmd;
+	auto data = m_texture_cache.invalidate_range(cmd, range, cause);
+	AUDIT(data.empty());
+
+	if (cause == rsx::invalidation_cause::unmap && data.violation_handled)
+	{
+		m_texture_cache.purge_unreleased_sections();
+		{
+			std::lock_guard lock(m_sampler_mutex);
+			m_samplers_dirty.store(true);
+		}
+	}
+}
+
+void MTLGSRender::on_semaphore_acquire_wait()
+{
+	if (!m_work_queue.empty() ||
+		(async_flip_requested & flip_request::emu_requested))
+	{
+		do_local_task(rsx::FIFO::state::lock_wait);
+	}
+}
+
+void MTLGSRender::do_local_task(rsx::FIFO::state state)
+{
+	if (!m_work_queue.empty())
+	{
+		std::lock_guard lock(m_queue_guard);
+
+		m_work_queue.remove_if([](auto& q) { return q.received.load(); });
+
+		for (auto& q : m_work_queue)
+		{
+			if (q.processed.load()) continue;
+
+			mtl::command_context cmd;
+			q.result = m_texture_cache.flush_all(cmd, q.section_data);
+			q.processed = true;
+		}
+	}
+	else if (!in_begin_end && state != rsx::FIFO::state::lock_wait)
+	{
+		if (m_graphics_state & rsx::pipeline_state::framebuffer_reads_dirty)
+		{
+			// Re-engages locks; only safe when nobody waits in the access violation handler
+			m_texture_cache.do_update();
+			m_graphics_state.clear(rsx::pipeline_state::framebuffer_reads_dirty);
+		}
+	}
+
+	rsx::thread::do_local_task(state);
+}
+
+mtl::work_item& MTLGSRender::post_flush_request(u32 address, mtl::texture_cache::thrashed_set& flush_data)
+{
+	std::lock_guard lock(m_queue_guard);
+
+	auto& result = m_work_queue.emplace_back();
+	result.address_to_flush = address;
+	result.section_data = std::move(flush_data);
+	return result;
+}
+
+bool MTLGSRender::scaled_image_from_memory(const rsx::blit_src_info& src, const rsx::blit_dst_info& dst, bool interpolate)
+{
+	if (!m_device_ready)
+	{
+		return false;
+	}
+
+	mtl::command_context cmd;
+	if (m_texture_cache.blit(cmd, src, dst, interpolate, m_rtts))
+	{
+		m_samplers_dirty.store(true);
+		return true;
+	}
+
+	return false;
 }
 
 void MTLGSRender::clear_surface(u32 arg)
@@ -400,6 +567,7 @@ void MTLGSRender::flip(const rsx::display_flip_info_t& info)
 	{
 		mtl::command_context cmd;
 		m_rtts.trim(cmd);
+		m_texture_cache.on_frame_end();
 
 		if (const u32 total = mtl::g_programs_ok + mtl::g_programs_failed; total != m_reported_programs)
 		{

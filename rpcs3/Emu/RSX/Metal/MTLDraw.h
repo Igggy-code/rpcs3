@@ -114,7 +114,8 @@ namespace mtl
 	{
 		ring_buffer,     // Buffer at 'offset' in the data ring
 		ring_texels,     // R8Uint texture buffer over the whole data ring (vertex pulling streams)
-		dummy_texture,   // Placeholder texture matching the declared type (until the texture cache exists)
+		dummy_texture,   // Placeholder texture matching the declared type (unbound texture units)
+		texture,         // 'texture_handle' (id<MTLTexture>) with 'sampler_handle' (id<MTLSamplerState>)
 	};
 
 	struct resource_binding
@@ -123,7 +124,9 @@ namespace mtl
 		binding_source source = binding_source::ring_buffer;
 		u32 index = 0;          // Metal buffer/texture index
 		u32 offset = 0;         // ring_buffer only
-		u32 sampler = 0;        // dummy_texture only
+		u32 sampler = 0;        // Sampler index (dummy_texture and texture)
+		void* texture_handle = nullptr;
+		void* sampler_handle = nullptr;
 		texture_dimension dimension = texture_dimension::dim_2d;
 		bool depth = false;
 		bool multisampled = false;

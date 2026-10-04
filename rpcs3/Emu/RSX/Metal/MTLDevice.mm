@@ -41,6 +41,21 @@ namespace
 		case mtl::pixel_format::depth16: return MTLPixelFormatDepth16Unorm;
 		case mtl::pixel_format::depth32f: return MTLPixelFormatDepth32Float;
 		case mtl::pixel_format::depth32f_stencil8: return MTLPixelFormatDepth32Float_Stencil8;
+		case mtl::pixel_format::a1bgr5: return MTLPixelFormatA1BGR5Unorm;
+		case mtl::pixel_format::abgr4: return MTLPixelFormatABGR4Unorm;
+		case mtl::pixel_format::rg8_snorm: return MTLPixelFormatRG8Snorm;
+		case mtl::pixel_format::r16: return MTLPixelFormatR16Unorm;
+		case mtl::pixel_format::rg16: return MTLPixelFormatRG16Unorm;
+		case mtl::pixel_format::rg16f: return MTLPixelFormatRG16Float;
+		case mtl::pixel_format::bc1: return MTLPixelFormatBC1_RGBA;
+		case mtl::pixel_format::bc2: return MTLPixelFormatBC2_RGBA;
+		case mtl::pixel_format::bc3: return MTLPixelFormatBC3_RGBA;
+		case mtl::pixel_format::r8_uint: return MTLPixelFormatR8Uint;
+		case mtl::pixel_format::r16_uint: return MTLPixelFormatR16Uint;
+		case mtl::pixel_format::r32_uint: return MTLPixelFormatR32Uint;
+		case mtl::pixel_format::rg32_uint: return MTLPixelFormatRG32Uint;
+		case mtl::pixel_format::rgba32_uint: return MTLPixelFormatRGBA32Uint;
+		case mtl::pixel_format::x32_stencil8: return MTLPixelFormatX32_Stencil8;
 		case mtl::pixel_format::invalid: break;
 		}
 
@@ -231,32 +246,190 @@ namespace mtl
 		}
 	}
 
+	static texture_desc make_2d_desc(u32 width, u32 height, pixel_format format, u32 usage)
+	{
+		texture_desc desc{};
+		desc.type = texture_type::tex_2d;
+		desc.width = width;
+		desc.height = height;
+		desc.format = format;
+		desc.usage = usage;
+		return desc;
+	}
+
 	texture::texture(u32 width, u32 height, pixel_format format, u32 usage)
-		: m_width(width), m_height(height), m_format(format)
+		: texture(make_2d_desc(width, height, format, usage))
+	{
+	}
+
+	texture::texture(const texture_desc& info)
+		: m_desc(info)
 	{
 		@autoreleasepool
 		{
-			const MTLPixelFormat mtl_format = to_mtl(format);
+			const MTLPixelFormat mtl_format = to_mtl(info.format);
 
-			if (!s_device || mtl_format == MTLPixelFormatInvalid || !width || !height)
+			if (!s_device || mtl_format == MTLPixelFormatInvalid || !info.width || !info.height)
 			{
 				return;
 			}
 
-			MTLTextureDescriptor* desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:mtl_format width:width height:height mipmapped:NO];
-			desc.storageMode = MTLStorageModePrivate;
-			desc.usage = MTLTextureUsageUnknown;
+			m_desc.depth = std::max(1u, info.type == texture_type::tex_3d ? info.depth : 1u);
+			m_desc.levels = std::max(1u, info.levels);
 
-			if (usage & usage_sampled) desc.usage |= MTLTextureUsageShaderRead;
-			if (usage & usage_render_target) desc.usage |= MTLTextureUsageRenderTarget;
+			MTLTextureDescriptor* desc = [MTLTextureDescriptor new];
+			desc.pixelFormat = mtl_format;
+			desc.width = info.width;
+			desc.height = info.type == texture_type::tex_1d ? 1 : info.height;
+			desc.depth = m_desc.depth;
+			desc.mipmapLevelCount = m_desc.levels;
+			desc.storageMode = MTLStorageModePrivate;
+
+			switch (info.type)
+			{
+			case texture_type::tex_1d: desc.textureType = MTLTextureType1D; break;
+			case texture_type::tex_2d: desc.textureType = MTLTextureType2D; break;
+			case texture_type::tex_3d: desc.textureType = MTLTextureType3D; break;
+			case texture_type::tex_cube: desc.textureType = MTLTextureTypeCube; desc.height = info.width; break;
+			}
+
+			// Views are used for channel swizzles and depth/stencil aspects
+			desc.usage = MTLTextureUsagePixelFormatView;
+			if (info.usage & usage_sampled) desc.usage |= MTLTextureUsageShaderRead;
+			if (info.usage & usage_render_target) desc.usage |= MTLTextureUsageRenderTarget;
 
 			id<MTLTexture> tex = [s_device newTextureWithDescriptor:desc];
 			m_handle = (__bridge_retained void*)tex;
+
+			if (info.type == texture_type::tex_cube)
+			{
+				m_desc.height = info.width;
+			}
 		}
+	}
+
+	texture_view::~texture_view()
+	{
+		if (m_handle)
+		{
+			CFRelease(m_handle);
+			m_handle = nullptr;
+		}
+	}
+
+	void texture::set_native_component_layout(const std::array<swizzle, 4>& layout)
+	{
+		if (layout != m_native_layout)
+		{
+			m_native_layout = layout;
+			m_views.clear();
+		}
+	}
+
+	texture_view* texture::get_view(const swizzle_rgba& mapping, image_aspect aspect, u32 remap_encoding)
+	{
+		if (!m_handle)
+		{
+			return nullptr;
+		}
+
+		u64 key = (static_cast<u64>(remap_encoding) << 32) | (static_cast<u64>(aspect) << 16);
+		for (int i = 0; i < 4; ++i)
+		{
+			key |= static_cast<u64>(mapping[i]) << (i * 4);
+		}
+
+		if (auto found = m_views.find(key); found != m_views.end())
+		{
+			return found->second.get();
+		}
+
+		@autoreleasepool
+		{
+			id<MTLTexture> base = (__bridge id<MTLTexture>)m_handle;
+			MTLPixelFormat view_format = base.pixelFormat;
+
+			if (aspect == image_aspect::stencil && has_stencil(m_desc.format))
+			{
+				view_format = MTLPixelFormatX32_Stencil8;
+			}
+
+			const MTLTextureSwizzleChannels channels = MTLTextureSwizzleChannelsMake(
+				static_cast<MTLTextureSwizzle>(mapping[0]),
+				static_cast<MTLTextureSwizzle>(mapping[1]),
+				static_cast<MTLTextureSwizzle>(mapping[2]),
+				static_cast<MTLTextureSwizzle>(mapping[3]));
+
+			id<MTLTexture> view = [base newTextureViewWithPixelFormat:view_format
+				textureType:base.textureType
+				levels:NSMakeRange(0, base.mipmapLevelCount)
+				slices:NSMakeRange(0, base.arrayLength * (base.textureType == MTLTextureTypeCube ? 6 : 1))
+				swizzle:channels];
+
+			if (!view)
+			{
+				return nullptr;
+			}
+
+			auto result = std::make_unique<texture_view>(this, (__bridge_retained void*)view, mapping, aspect, remap_encoding);
+			auto ptr = result.get();
+			m_views.emplace(key, std::move(result));
+			return ptr;
+		}
+	}
+
+	bool is_compressed_format(pixel_format format)
+	{
+		return format == pixel_format::bc1 || format == pixel_format::bc2 || format == pixel_format::bc3;
+	}
+
+	u32 get_format_block_size(pixel_format format)
+	{
+		switch (format)
+		{
+		case pixel_format::r8:
+		case pixel_format::r8_uint:
+			return 1;
+		case pixel_format::b5g6r5:
+		case pixel_format::bgr5a1:
+		case pixel_format::a1bgr5:
+		case pixel_format::abgr4:
+		case pixel_format::rg8:
+		case pixel_format::rg8_snorm:
+		case pixel_format::r16:
+		case pixel_format::r16_uint:
+		case pixel_format::depth16:
+			return 2;
+		case pixel_format::bgra8:
+		case pixel_format::rgba8:
+		case pixel_format::rg16:
+		case pixel_format::rg16f:
+		case pixel_format::r32f:
+		case pixel_format::r32_uint:
+		case pixel_format::depth32f:
+			return 4;
+		case pixel_format::depth32f_stencil8:
+		case pixel_format::x32_stencil8:
+		case pixel_format::rgba16f:
+		case pixel_format::rg32_uint:
+		case pixel_format::bc1:
+			return 8;
+		case pixel_format::rgba32f:
+		case pixel_format::rgba32_uint:
+		case pixel_format::bc2:
+		case pixel_format::bc3:
+			return 16;
+		case pixel_format::invalid:
+			break;
+		}
+
+		return 4;
 	}
 
 	texture::~texture()
 	{
+		m_views.clear();
+
 		if (m_handle)
 		{
 			// Balance __bridge_retained. Pending command buffers keep their own references to textures they use.
@@ -362,6 +535,18 @@ namespace mtl
 		}
 
 		return true;
+	}
+
+	void finish()
+	{
+		@autoreleasepool
+		{
+			if (id<MTLCommandBuffer> cmd = internal::take_command_buffer())
+			{
+				[cmd commit];
+				[cmd waitUntilCompleted];
+			}
+		}
 	}
 
 	void flush()

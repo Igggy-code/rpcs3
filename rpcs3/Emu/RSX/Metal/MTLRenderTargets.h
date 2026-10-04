@@ -4,6 +4,7 @@
 // backend-agnostic rsx::surface_store, following the OpenGL backend (GL/GLRenderTargets.h).
 
 #include "MTLDevice.h"
+#include "MTLTexture.h"
 
 #include "Emu/RSX/Common/surface_store.h"
 #include "Emu/RSX/Common/TextureUtils.h"
@@ -25,22 +26,19 @@ namespace mtl
 	};
 
 	pixel_format surface_color_format_to_mtl(rsx::surface_color_format format);
+	// Native component layout (RSX ARGB order) of a color surface stored in its Metal format
+	std::array<swizzle, 4> surface_color_component_layout(rsx::surface_color_format format);
 	pixel_format surface_depth_format_to_mtl(rsx::surface_depth_format2 format);
 
-	class render_target : public texture, public rsx::render_target_descriptor<texture*>
+	class render_target : public viewable_image, public rsx::render_target_descriptor<texture*>
 	{
-		rsx::format_class m_format_class;
-
 		void initialize_memory(command_context& cmd, rsx::surface_access access);
 
 	public:
 		render_target(u32 width, u32 height, pixel_format format, rsx::format_class format_class)
-			: texture(width, height, format, usage_sampled | usage_render_target)
-			, m_format_class(format_class)
+			: viewable_image(width, height, format, usage_sampled | usage_render_target, format_class)
 		{
 		}
-
-		rsx::format_class format_class() const { return m_format_class; }
 
 		void set_native_pitch(u32 pitch) { native_pitch = pitch; }
 		void set_rsx_pitch(u32 pitch) { rsx_pitch = pitch; }
@@ -57,7 +55,7 @@ namespace mtl
 			return is_depth();
 		}
 
-		texture* get_surface(rsx::surface_access /*access_type*/) override
+		viewable_image* get_surface(rsx::surface_access /*access_type*/) override
 		{
 			return this;
 		}
@@ -67,6 +65,9 @@ namespace mtl
 			const auto [scaled_w, scaled_h] = rsx::apply_resolution_scale<true>(resolution_scaling_config, _width, _height);
 			return scaled_w == width() && scaled_h == height();
 		}
+
+		// Copies inherited contents (same format, scaled or bit-cast)
+		void transfer_contents(render_target& src, const areai& src_area, const areai& dst_area);
 
 		// Resolves pending inherited contents (old_contents) and initializes fresh surfaces
 		void memory_barrier(command_context& cmd, rsx::surface_access access);
@@ -109,6 +110,7 @@ struct mtl_render_target_traits
 		auto result = std::make_unique<mtl::render_target>(width_, height_, mtl::surface_color_format_to_mtl(surface_color_format), rsx::RSX_FORMAT_CLASS_COLOR);
 
 		result->set_label(fmt::format("RTV@0x%x", address));
+		result->set_native_component_layout(mtl::surface_color_component_layout(surface_color_format));
 		result->set_aa_mode(antialias);
 		result->set_resolution_scaling_config(resolution_scaling_config);
 		result->set_native_pitch(static_cast<u32>(width) * get_format_block_size_in_bytes(surface_color_format) * result->samples_x);
@@ -180,6 +182,7 @@ struct mtl_render_target_traits
 				ref->get_surface_height<rsx::surface_metrics::pixels>());
 
 			sink = std::make_unique<mtl::render_target>(new_w, new_h, ref->format(), ref->format_class());
+			sink->set_native_component_layout(ref->native_component_layout());
 		}
 
 		if (initialize)
@@ -273,6 +276,7 @@ struct mtl_render_target_traits
 		usz pitch)
 	{
 		surface->set_format(format);
+		surface->set_native_component_layout(mtl::surface_color_component_layout(format));
 		surface->set_label(fmt::format("RTV@0x%x", address));
 		int_invalidate_surface_contents(cmd, surface, address, pitch);
 	}

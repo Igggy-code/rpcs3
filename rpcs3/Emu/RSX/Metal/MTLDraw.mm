@@ -304,6 +304,15 @@ namespace
 	}
 }
 
+namespace mtl::internal
+{
+	id<MTLBuffer> ring_buffer()
+	{
+		ensure_ring();
+		return s_ring.buffer;
+	}
+}
+
 namespace mtl
 {
 	ring_allocation ring_alloc(u32 size, u32 alignment)
@@ -501,6 +510,29 @@ namespace mtl
 					if (vertex) [enc setVertexTexture:s_ring.texels atIndex:b.index];
 					else [enc setFragmentTexture:s_ring.texels atIndex:b.index];
 					break;
+
+				case binding_source::texture:
+				{
+					id<MTLTexture> tex = (__bridge id<MTLTexture>)b.texture_handle;
+					id<MTLSamplerState> sampler = b.sampler_handle ? (__bridge id<MTLSamplerState>)b.sampler_handle : get_sampler(b.depth);
+
+					if (!tex)
+					{
+						tex = get_dummy_texture(b.dimension, b.depth, b.multisampled);
+					}
+
+					if (vertex)
+					{
+						[enc setVertexTexture:tex atIndex:b.index];
+						[enc setVertexSamplerState:sampler atIndex:b.sampler];
+					}
+					else
+					{
+						[enc setFragmentTexture:tex atIndex:b.index];
+						[enc setFragmentSamplerState:sampler atIndex:b.sampler];
+					}
+					break;
+				}
 
 				case binding_source::dummy_texture:
 				{

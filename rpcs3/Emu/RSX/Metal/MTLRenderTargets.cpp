@@ -1,5 +1,6 @@
 #include "stdafx.h"
 #include "MTLRenderTargets.h"
+#include "MTLTextureOps.h"
 
 namespace mtl
 {
@@ -35,6 +36,31 @@ namespace mtl
 		fmt::throw_exception("Unknown surface color format 0x%x", static_cast<u32>(format));
 	}
 
+	std::array<swizzle, 4> surface_color_component_layout(rsx::surface_color_format format)
+	{
+		using enum swizzle;
+
+		switch (format)
+		{
+		case rsx::surface_color_format::x1r5g5b5_o1r5g5b5:
+		case rsx::surface_color_format::x8r8g8b8_o8r8g8b8:
+		case rsx::surface_color_format::x8b8g8r8_o8b8g8r8:
+			return { one, red, green, blue };
+		case rsx::surface_color_format::x1r5g5b5_z1r5g5b5:
+		case rsx::surface_color_format::x8r8g8b8_z8r8g8b8:
+		case rsx::surface_color_format::x8b8g8r8_z8b8g8r8:
+			return { zero, red, green, blue };
+		case rsx::surface_color_format::b8:
+			return { one, red, red, red };
+		case rsx::surface_color_format::g8b8:
+			return { green, red, green, red };
+		case rsx::surface_color_format::x32:
+			return { red, red, red, red };
+		default:
+			return { alpha, red, green, blue };
+		}
+	}
+
 	pixel_format surface_depth_format_to_mtl(rsx::surface_depth_format2 format)
 	{
 		switch (format)
@@ -66,6 +92,45 @@ namespace mtl
 
 		state_flags &= ~rsx::surface_state_flags::erase_bkgnd;
 		msaa_flags = rsx::surface_state_flags::ready;
+	}
+
+	void render_target::transfer_contents(render_target& src, const areai& src_area, const areai& dst_area)
+	{
+		const bool same_size = src_area.width() == dst_area.width() && src_area.height() == dst_area.height();
+
+		if (src.format() == format())
+		{
+			if (same_size)
+			{
+				copy_region(src, *this, src_area.x1, src_area.y1, dst_area.x1, dst_area.y1, src_area.width(), src_area.height());
+				return;
+			}
+
+			const blit_rect src_rect{ src_area.x1, src_area.y1, src_area.width(), src_area.height() };
+			const blit_rect dst_rect{ dst_area.x1, dst_area.y1, dst_area.width(), dst_area.height() };
+			if (blit_texture(src, 0, 0, src_rect, *this, 0, 0, dst_rect, !is_depth()))
+			{
+				return;
+			}
+		}
+		else if (!src.is_depth() && !is_depth())
+		{
+			// Same memory viewed with another format: reinterpret the bytes. Rows keep their byte width.
+			const u32 src_bpp = src.block_size();
+			const u32 dst_bpp = block_size();
+			const u32 row_bytes = static_cast<u32>(src_area.width()) * src_bpp;
+
+			if (src_area.height() == dst_area.height() && row_bytes % dst_bpp == 0 &&
+				copy_typeless(src, src_area.x1, src_area.y1, src_area.width(), src_area.height(),
+					*this, dst_area.x1, dst_area.y1, row_bytes / dst_bpp))
+			{
+				return;
+			}
+		}
+
+		rsx_log.todo("Metal: unsupported surface transfer (fmt %d -> %d, %dx%d -> %dx%d)",
+			static_cast<int>(src.format()), static_cast<int>(format()),
+			src_area.width(), src_area.height(), dst_area.width(), dst_area.height());
 	}
 
 	void render_target::memory_barrier(command_context& cmd, rsx::surface_access access)
@@ -117,17 +182,7 @@ namespace mtl
 				initialize_memory(cmd, rsx::surface_access::memory_write);
 			}
 
-			// TODO: scaled and typeless (format-changing) transfers need a draw-based blit
-			if (src_texture->format() != format() || src_area.width() != dst_area.width() || src_area.height() != dst_area.height())
-			{
-				rsx_log.todo("Metal: unsupported surface transfer (fmt %d -> %d, %dx%d -> %dx%d)",
-					static_cast<int>(src_texture->format()), static_cast<int>(format()),
-					src_area.width(), src_area.height(), dst_area.width(), dst_area.height());
-			}
-			else
-			{
-				copy_region(*src_texture, *this, src_area.x1, src_area.y1, dst_area.x1, dst_area.y1, src_area.width(), src_area.height());
-			}
+			transfer_contents(*src_texture, src_area, dst_area);
 
 			newest_tag = src_texture->last_use_tag;
 		}
