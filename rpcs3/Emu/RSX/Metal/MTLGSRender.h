@@ -48,7 +48,7 @@ private:
 	// Uploads constants and per-draw state shared by all subdraws
 	bool upload_draw_env(draw_env& env);
 	bool upload_vertex_data(vertex_upload_info& info);
-	void emit_geometry(u32 sub_index, const draw_env& env);
+	void emit_draw(u32 sub_index, const draw_env& env);
 	void fill_fixed_function_state(mtl::draw_desc& desc);
 
 	mtl::presenter* m_presenter = nullptr;

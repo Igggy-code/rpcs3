@@ -576,7 +576,7 @@ void MTLGSRender::fill_fixed_function_state(mtl::draw_desc& desc)
 	}
 }
 
-void MTLGSRender::emit_geometry(u32 sub_index, const draw_env& env)
+void MTLGSRender::emit_draw(u32 sub_index, const draw_env& env)
 {
 	auto& draw_call = rsx::method_registers.current_draw_clause;
 
@@ -808,7 +808,7 @@ void MTLGSRender::end()
 	u32 sub_index = 0;
 	do
 	{
-		emit_geometry(sub_index++, env);
+		emit_draw(sub_index++, env);
 	}
 	while (draw_call.next());
 
