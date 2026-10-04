@@ -220,7 +220,7 @@ namespace
 
 	id<MTLSamplerState> get_sampler(bool compare)
 	{
-		id<MTLSamplerState>& sampler = compare ? s_compare_sampler : s_sampler;
+		__strong id<MTLSamplerState>& sampler = compare ? s_compare_sampler : s_sampler;
 
 		if (!sampler)
 		{
