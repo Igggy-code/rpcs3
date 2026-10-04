@@ -10,6 +10,7 @@
 #include "Emu/RSX/Utils/rsx_utils.h"
 #include "Emu/system_config.h"
 #include "Emu/RSX/Program/SPIRVCommon.h"
+#include "Emu/RSX/Host/MM.h"
 
 u64 MTLGSRender::get_cycles()
 {
@@ -160,6 +161,12 @@ void MTLGSRender::init_buffers(rsx::framebuffer_creation_context context)
 
 	// There is no framebuffer object to build in Metal: attachments are bound per render pass
 	m_graphics_state.set(rsx::rtt_config_valid);
+}
+
+bool MTLGSRender::on_access_violation(u32 address, bool /*is_writing*/)
+{
+	rsx::mm_flush(address);
+	return zcull_ctrl->on_access_violation(address);
 }
 
 void MTLGSRender::clear_surface(u32 arg)

@@ -32,6 +32,10 @@ private:
 	void clear_surface(u32 arg) override;
 	void flip(const rsx::display_flip_info_t& info) override;
 
+	// Guest accesses to protected pages. Without a texture cache only the ZCULL report pages are protected,
+	// but they must still be released, otherwise the faulting thread never makes progress.
+	bool on_access_violation(u32 address, bool is_writing) override;
+
 	// Binds the current RSX framebuffer configuration to surfaces (creates them when needed)
 	void init_buffers(rsx::framebuffer_creation_context context);
 
