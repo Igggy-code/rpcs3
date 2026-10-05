@@ -442,7 +442,47 @@ void MTLGSRender::clear_surface(u32 arg)
 	bool update_color = false, update_z = false;
 	const rsx::surface_depth_format2 surface_depth_format = rsx::method_registers.surface_depth_fmt();
 
-	// TODO: partial (scissored) and masked clears are applied to the whole surface for now
+	// Clear rectangle: the (unclipped) scissor, limited to the framebuffer. Games clear sub-regions of
+	// atlases (e.g. one shadow cascade at a time), so partial clears must not touch the rest.
+	if (areau scissor; get_scissor(scissor, false))
+	{
+		m_scissor = scissor;
+	}
+
+	const auto [fb_width, fb_height] = rsx::apply_resolution_scale<true>(resolution_scaling_config, m_framebuffer_layout.width, m_framebuffer_layout.height);
+	const u32 clear_x = std::min<u32>(m_scissor.x1, fb_width);
+	const u32 clear_y = std::min<u32>(m_scissor.y1, fb_height);
+	const u32 clear_w = std::min<u32>(m_scissor.x2, fb_width) - clear_x;
+	const u32 clear_h = std::min<u32>(m_scissor.y2, fb_height) - clear_y;
+	// A load-action clear wipes the whole texture: only allowed when the rectangle covers it
+	// (surfaces can be larger than the current framebuffer region)
+	const auto covers = [&](const mtl::texture* tex)
+	{
+		return clear_x == 0 && clear_y == 0 && clear_w >= tex->width() && clear_h >= tex->height();
+	};
+
+	if (!clear_w || !clear_h)
+	{
+		return;
+	}
+
+	mtl::clear_desc region{};
+	region.x = clear_x;
+	region.y = clear_y;
+	region.width = clear_w;
+	region.height = clear_h;
+
+	// Same attachments as the draws, so partial clears are recorded in the open render pass
+	{
+		u32 slot = 0;
+		for (const auto& index : m_rtts.m_bound_render_target_ids)
+		{
+			if (auto rtt = m_rtts.m_bound_render_targets[index].second; rtt && slot < 4) region.color[slot++] = rtt;
+		}
+
+		region.depth = std::get<1>(m_rtts.m_bound_depth_stencil);
+	}
+
 	if (auto ds = std::get<1>(m_rtts.m_bound_depth_stencil); ds && (arg & RSX_GCM_CLEAR_DEPTH_STENCIL_MASK))
 	{
 		bool clear_depth = false, clear_stencil = false;
@@ -465,8 +505,30 @@ void MTLGSRender::clear_surface(u32 arg)
 
 		if (clear_depth || clear_stencil)
 		{
-			ds->state_flags &= ~rsx::surface_state_flags::erase_bkgnd;
-			mtl::clear_depth_stencil(*ds, clear_depth, depth, clear_stencil, stencil);
+			const u8 stencil_mask = static_cast<u8>(rsx::method_registers.stencil_mask());
+			const bool stencil_complete = !clear_stencil || stencil_mask == 0xff || !has_stencil(ds->format());
+
+			if (covers(ds) && stencil_complete)
+			{
+				ds->state_flags &= ~rsx::surface_state_flags::erase_bkgnd;
+				mtl::clear_depth_stencil(*ds, clear_depth, depth, clear_stencil, stencil);
+			}
+			else
+			{
+				// Partial clear: keep the rest of the surface (resolve inherited contents first)
+				mtl::command_context cmd;
+				ds->write_barrier(cmd);
+
+				mtl::clear_desc dsc = region;
+				dsc.depth = ds;
+				dsc.clear_depth = clear_depth;
+				dsc.depth_value = depth;
+				dsc.clear_stencil = clear_stencil;
+				dsc.stencil_value = stencil;
+				dsc.stencil_write_mask = stencil_mask;
+				mtl::clear_region(dsc);
+			}
+
 			update_z = true;
 		}
 	}
@@ -519,11 +581,39 @@ void MTLGSRender::clear_surface(u32 arg)
 			// so the logical clear color is used as-is
 			const float rgba[4] = { clear_r / 255.f, clear_g / 255.f, clear_b / 255.f, clear_a / 255.f };
 
+			bool full_frame = colormask == 0xf0;
 			for (const auto& index : m_rtts.m_bound_render_target_ids)
 			{
-				auto rtt = m_rtts.m_bound_render_targets[index].second;
-				rtt->state_flags &= ~rsx::surface_state_flags::erase_bkgnd;
-				mtl::clear_color(*rtt, rgba, colormask >> 4);
+				if (auto rtt = m_rtts.m_bound_render_targets[index].second; rtt && !covers(rtt)) full_frame = false;
+			}
+
+			if (full_frame)
+			{
+				for (const auto& index : m_rtts.m_bound_render_target_ids)
+				{
+					auto rtt = m_rtts.m_bound_render_targets[index].second;
+					rtt->state_flags &= ~rsx::surface_state_flags::erase_bkgnd;
+					mtl::clear_color(*rtt, rgba, colormask >> 4);
+				}
+			}
+			else
+			{
+				// Partial or channel-masked clear of all bound targets in one draw
+				mtl::command_context cmd;
+				mtl::clear_desc cc = region;
+
+				for (const auto& index : m_rtts.m_bound_render_target_ids)
+				{
+					if (auto rtt = m_rtts.m_bound_render_targets[index].second) rtt->write_barrier(cmd);
+				}
+
+				std::copy(rgba, rgba + 4, cc.rgba);
+				cc.color_mask =
+					((colormask & RSX_GCM_CLEAR_RED_BIT) ? 8u : 0u) |
+					((colormask & RSX_GCM_CLEAR_GREEN_BIT) ? 4u : 0u) |
+					((colormask & RSX_GCM_CLEAR_BLUE_BIT) ? 2u : 0u) |
+					((colormask & RSX_GCM_CLEAR_ALPHA_BIT) ? 1u : 0u);
+				mtl::clear_region(cc);
 			}
 
 			update_color = true;

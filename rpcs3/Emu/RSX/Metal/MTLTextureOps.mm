@@ -89,6 +89,31 @@ struct depth_out
 	float depth [[depth(any)]];
 };
 
+// Draw-based clears: full-screen triangle at the clear depth, constant color on every attachment
+struct clear_vs_out
+{
+	float4 pos [[position]];
+};
+
+vertex clear_vs_out clear_vs(uint vid [[vertex_id]], constant float& depth [[buffer(0)]])
+{
+	const float2 p = float2((vid << 1) & 2, vid & 2);
+	clear_vs_out o;
+	o.pos = float4(p * 2.0 - 1.0, depth, 1.0);
+	return o;
+}
+
+struct clear_out1 { float4 c0 [[color(0)]]; };
+struct clear_out2 { float4 c0 [[color(0)]]; float4 c1 [[color(1)]]; };
+struct clear_out3 { float4 c0 [[color(0)]]; float4 c1 [[color(1)]]; float4 c2 [[color(2)]]; };
+struct clear_out4 { float4 c0 [[color(0)]]; float4 c1 [[color(1)]]; float4 c2 [[color(2)]]; float4 c3 [[color(3)]]; };
+
+fragment clear_out1 clear_fs1(constant float4& c [[buffer(0)]]) { return { c }; }
+fragment clear_out2 clear_fs2(constant float4& c [[buffer(0)]]) { return { c, c }; }
+fragment clear_out3 clear_fs3(constant float4& c [[buffer(0)]]) { return { c, c, c }; }
+fragment clear_out4 clear_fs4(constant float4& c [[buffer(0)]]) { return { c, c, c, c }; }
+fragment void clear_fs0() {}
+
 // Typeless transfers through the guest representation of depth formats (see copy_typeless)
 struct conv_params
 {
@@ -166,6 +191,8 @@ fragment depth_out blit_depth_fs(vs_out in [[stage_in]], depth2d<float> tex [[te
 	id<MTLSamplerState> s_blit_nearest = nil;
 	id<MTLDepthStencilState> s_depth_write_always = nil;
 	std::unordered_map<std::string, id<MTLComputePipelineState>> s_compute_pipelines;
+	std::unordered_map<u64, id<MTLRenderPipelineState>> s_clear_pipelines;
+	std::unordered_map<u32, id<MTLDepthStencilState>> s_clear_depth_states;
 
 	struct sampler_hash
 	{
@@ -843,6 +870,150 @@ namespace mtl
 		}
 	}
 
+	bool clear_region(const clear_desc& desc)
+	{
+		@autoreleasepool
+		{
+			__unsafe_unretained id<MTLTexture> color[4] = {};
+			u32 width = ~0u, height = ~0u;
+			u32 max_index = 0;
+			u64 key = 0;
+
+			for (u32 i = 0; i < 4; ++i)
+			{
+				if (desc.color[i] && desc.color[i]->valid())
+				{
+					color[i] = as_mtl(*desc.color[i]);
+					width = std::min(width, desc.color[i]->width());
+					height = std::min(height, desc.color[i]->height());
+					max_index = i + 1;
+					key |= static_cast<u64>(internal::to_mtl_format(desc.color[i]->format())) << (i * 10);
+				}
+			}
+
+			id<MTLTexture> depth = nil;
+			const bool stencil = desc.depth && has_stencil(desc.depth->format());
+			if (desc.depth && desc.depth->valid())
+			{
+				depth = as_mtl(*desc.depth);
+				width = std::min(width, desc.depth->width());
+				height = std::min(height, desc.depth->height());
+				key |= static_cast<u64>(internal::to_mtl_format(desc.depth->format())) << 40;
+			}
+
+			if (width == ~0u || desc.x >= width || desc.y >= height || !desc.width || !desc.height)
+			{
+				return false;
+			}
+
+			key |= static_cast<u64>(desc.color_mask & 0xf) << 52;
+
+			std::lock_guard lock(s_ops_lock);
+
+			if (!ensure_blit_library())
+			{
+				return false;
+			}
+
+			id<MTLRenderPipelineState> pso = nil;
+			if (auto found = s_clear_pipelines.find(key); found != s_clear_pipelines.end())
+			{
+				pso = found->second;
+			}
+			else
+			{
+				MTLRenderPipelineDescriptor* pd = [MTLRenderPipelineDescriptor new];
+				pd.label = @"RSX clear";
+				pd.vertexFunction = [s_blit_library newFunctionWithName:@"clear_vs"];
+				pd.fragmentFunction = [s_blit_library newFunctionWithName:[NSString stringWithFormat:@"clear_fs%u", max_index]];
+
+				for (u32 i = 0; i < 4; ++i)
+				{
+					if (color[i])
+					{
+						pd.colorAttachments[i].pixelFormat = color[i].pixelFormat;
+						pd.colorAttachments[i].writeMask = static_cast<MTLColorWriteMask>(desc.color_mask & 0xf);
+					}
+				}
+
+				if (depth)
+				{
+					pd.depthAttachmentPixelFormat = depth.pixelFormat;
+					if (stencil) pd.stencilAttachmentPixelFormat = depth.pixelFormat;
+				}
+
+				NSError* error = nil;
+				pso = [internal::device() newRenderPipelineStateWithDescriptor:pd error:&error];
+				s_clear_pipelines[key] = pso;
+			}
+
+			if (!pso)
+			{
+				return false;
+			}
+
+			const bool write_depth = depth && desc.clear_depth;
+			const bool write_stencil = stencil && desc.clear_stencil;
+			const u32 ds_key = (write_depth ? 1u : 0u) | (write_stencil ? 2u : 0u) | (u32{desc.stencil_write_mask} << 8);
+
+			id<MTLDepthStencilState> ds_state = nil;
+			if (auto found = s_clear_depth_states.find(ds_key); found != s_clear_depth_states.end())
+			{
+				ds_state = found->second;
+			}
+			else
+			{
+				MTLDepthStencilDescriptor* dd = [MTLDepthStencilDescriptor new];
+				dd.depthCompareFunction = MTLCompareFunctionAlways;
+				dd.depthWriteEnabled = write_depth ? YES : NO;
+
+				if (write_stencil)
+				{
+					MTLStencilDescriptor* sd = [MTLStencilDescriptor new];
+					sd.stencilCompareFunction = MTLCompareFunctionAlways;
+					sd.depthStencilPassOperation = MTLStencilOperationReplace;
+					sd.stencilFailureOperation = MTLStencilOperationReplace;
+					sd.depthFailureOperation = MTLStencilOperationReplace;
+					sd.readMask = 0xff;
+					sd.writeMask = desc.stencil_write_mask;
+					dd.frontFaceStencil = sd;
+					dd.backFaceStencil = sd;
+				}
+
+				ds_state = [internal::device() newDepthStencilStateWithDescriptor:dd];
+				s_clear_depth_states[ds_key] = ds_state;
+			}
+
+			bool is_new = false;
+			id<MTLRenderCommandEncoder> enc = internal::render_encoder(color, depth, stencil, is_new);
+			if (!enc)
+			{
+				return false;
+			}
+
+			const u32 sx = desc.x;
+			const u32 sy = desc.y;
+			const u32 sw = std::min(desc.width, width - sx);
+			const u32 sh = std::min(desc.height, height - sy);
+
+			[enc setRenderPipelineState:pso];
+			[enc setDepthStencilState:ds_state];
+			[enc setStencilReferenceValue:desc.stencil_value];
+			[enc setViewport:MTLViewport{ 0.0, 0.0, static_cast<double>(width), static_cast<double>(height), 0.0, 1.0 }];
+			[enc setScissorRect:MTLScissorRect{ sx, sy, sw, sh }];
+			[enc setCullMode:MTLCullModeNone];
+			[enc setDepthBias:0.f slopeScale:0.f clamp:0.f];
+			[enc setDepthClipMode:MTLDepthClipModeClamp];
+
+			const float depth_value = desc.depth_value;
+			[enc setVertexBytes:&depth_value length:sizeof(depth_value) atIndex:0];
+			[enc setFragmentBytes:desc.rgba length:sizeof(float) * 4 atIndex:0];
+			[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+		}
+
+		return true;
+	}
+
 	void prepare_texture_ops()
 	{
 		std::lock_guard lock(s_ops_lock);
@@ -860,6 +1031,8 @@ namespace mtl
 		s_samplers.clear();
 		s_blit_pipelines.clear();
 		s_compute_pipelines.clear();
+		s_clear_pipelines.clear();
+		s_clear_depth_states.clear();
 		s_blit_library = nil;
 		s_blit_linear = nil;
 		s_blit_nearest = nil;

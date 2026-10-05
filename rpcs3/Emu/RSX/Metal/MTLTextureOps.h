@@ -5,6 +5,8 @@
 
 #include "MTLDevice.h"
 
+#include <array>
+
 namespace mtl
 {
 	struct region3d
@@ -95,6 +97,24 @@ namespace mtl
 
 	// Cached id<MTLSamplerState>; owned by the device layer
 	void* get_sampler(const sampler_desc& desc);
+
+	// Draw-based clear of a rectangle of the bound attachments (scissored and channel-masked clears).
+	// Recorded in the current draw render pass when the attachments match.
+	struct clear_desc
+	{
+		std::array<texture*, 4> color{};
+		texture* depth = nullptr;
+		float rgba[4]{};
+		u32 color_mask = 0;          // MTLColorWriteMask bits (R = 8, G = 4, B = 2, A = 1)
+		bool clear_depth = false;
+		float depth_value = 1.f;
+		bool clear_stencil = false;
+		u8 stencil_value = 0;
+		u8 stencil_write_mask = 0xff;
+		u32 x = 0, y = 0, width = 0, height = 0;
+	};
+
+	bool clear_region(const clear_desc& desc);
 
 	// Compiles the transfer shaders up front (they are otherwise built on first use)
 	void prepare_texture_ops();
