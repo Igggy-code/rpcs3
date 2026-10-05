@@ -25,6 +25,9 @@ namespace mtl::internal
 	id<MTLRenderCommandEncoder> render_encoder(__unsafe_unretained const id<MTLTexture>* color, id<MTLTexture> depth, bool has_stencil, bool& is_new);
 	void close_render_pass();
 
+	// Logs a GPU stall (command buffers not completing) through the RPCS3 log hook, once per second at most
+	void report_gpu_stall(const char* where);
+
 	// Buffer behind mtl::ring_alloc (MTLDraw.mm)
 	id<MTLBuffer> ring_buffer();
 }

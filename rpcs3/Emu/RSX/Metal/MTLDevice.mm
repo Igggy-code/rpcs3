@@ -5,6 +5,10 @@
 
 #import <Metal/Metal.h>
 
+#include <atomic>
+#include <cstdio>
+#include <time.h>
+
 #include "MTLDevice.h"
 #include "MTLDeviceInternal.h"
 #include "MTLShaderCompiler.h"
@@ -85,6 +89,8 @@ namespace mtl::internal
 		return s_queue;
 	}
 
+	void report_gpu_error(const char* what);
+
 	id<MTLCommandBuffer> command_buffer()
 	{
 		std::lock_guard lock(s_lock);
@@ -93,6 +99,14 @@ namespace mtl::internal
 		{
 			s_pending = [s_queue commandBuffer];
 			s_pending.label = @"RSX";
+
+			[s_pending addCompletedHandler:^(id<MTLCommandBuffer> cmd)
+			{
+				if (cmd.error)
+				{
+					report_gpu_error(cmd.error.localizedDescription.UTF8String);
+				}
+			}];
 		}
 
 		return s_pending;
@@ -546,6 +560,43 @@ namespace mtl
 				[cmd commit];
 				[cmd waitUntilCompleted];
 			}
+		}
+	}
+
+	namespace
+	{
+		std::atomic<log_handler> s_log_handler{nullptr};
+		std::atomic<std::uint64_t> s_last_stall_report{0};
+	}
+
+	void set_log_handler(log_handler handler)
+	{
+		s_log_handler = handler;
+	}
+
+	void internal::report_gpu_error(const char* what)
+	{
+		if (auto handler = s_log_handler.load())
+		{
+			char text[512];
+			snprintf(text, sizeof(text), "Metal: command buffer failed: %s", what ? what : "unknown error");
+			handler(text);
+		}
+	}
+
+	void internal::report_gpu_stall(const char* where)
+	{
+		const std::uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1'000'000'000ull;
+		if (s_last_stall_report.exchange(now) == now)
+		{
+			return;
+		}
+
+		if (auto handler = s_log_handler.load())
+		{
+			char text[256];
+			snprintf(text, sizeof(text), "Metal: GPU work did not complete in time (%s)", where);
+			handler(text);
 		}
 	}
 

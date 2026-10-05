@@ -10,6 +10,7 @@
 #include "MTLDeviceInternal.h"
 
 #include <algorithm>
+#include <unistd.h>
 #include <cstring>
 #include <mutex>
 #include <string>
@@ -858,7 +859,22 @@ namespace mtl
 				flush();
 			}
 
-			[cmd waitUntilCompleted];
+			// Bounded wait: a stuck GPU must not deadlock the RSX thread (and the SPUs waiting on it)
+			for (u32 waited_ms = 0; cmd.status < MTLCommandBufferStatusCompleted; ++waited_ms)
+			{
+				if (waited_ms == 2000)
+				{
+					internal::report_gpu_stall("readback");
+				}
+				else if (waited_ms >= 10000)
+				{
+					return false;
+				}
+
+				[cmd waitUntilScheduled];
+				usleep(1000);
+			}
+
 			return cmd.status == MTLCommandBufferStatusCompleted;
 		}
 	}
@@ -915,6 +931,8 @@ namespace mtl
 			result->m_cmd = (__bridge_retained void*)cmd;
 		}
 
+		// Submit now: the copy (and the work before it) runs while the RSX thread continues
+		flush();
 		return result;
 	}
 

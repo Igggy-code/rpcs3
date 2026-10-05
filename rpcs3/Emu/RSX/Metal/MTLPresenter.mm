@@ -216,8 +216,13 @@ namespace mtl
 				p->layer.drawableSize = size;
 			}
 
-			// Throttle the CPU to the number of upload textures
-			dispatch_semaphore_wait(p->frames_in_flight, DISPATCH_TIME_FOREVER);
+			// Throttle the CPU to the number of upload textures. A GPU that stops completing work must not
+			// block the RSX thread forever (the game would deadlock waiting for it): report and continue.
+			if (dispatch_semaphore_wait(p->frames_in_flight, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC)) != 0)
+			{
+				NSLog(@"RPCS3 Metal: presentation waited 2 s for the GPU");
+				internal::report_gpu_stall("presentation");
+			}
 
 			id<MTLTexture> source = nil;
 			id<MTLRenderPipelineState> pipeline = nil;

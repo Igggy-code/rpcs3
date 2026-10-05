@@ -199,6 +199,10 @@ namespace mtl
 	// Same-format region copy (used when surfaces inherit contents from older surfaces)
 	bool copy_region(texture& src, texture& dst, u32 src_x, u32 src_y, u32 dst_x, u32 dst_y, u32 width, u32 height);
 	void flush();
+
+	// Error messages from the Objective-C++ layer (which cannot use the RPCS3 log channels)
+	using log_handler = void (*)(const char* message);
+	void set_log_handler(log_handler handler);
 	// Submits pending work and waits for the GPU to finish it
 	void finish();
 }

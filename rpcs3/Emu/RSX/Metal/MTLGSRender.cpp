@@ -55,6 +55,8 @@ void MTLGSRender::on_init_thread()
 
 	m_texture_cache.initialize();
 
+	mtl::set_log_handler([](const char* message) { rsx_log.error("%s", message); });
+
 	// Build the transfer shaders now rather than in the middle of a frame
 	mtl::prepare_texture_ops();
 
