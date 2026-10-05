@@ -8,6 +8,7 @@
 #include "MTLPresenter.h"
 
 #include "Emu/IdManager.h"
+#include "Emu/System.h"
 #include "Emu/Memory/vm.h"
 #include "Emu/Memory/vm_locking.h"
 #include "Emu/RSX/gcm_enums.h"
@@ -35,6 +36,8 @@ MTLGSRender::MTLGSRender(utils::serial* ar) noexcept : GSRender(ar)
 
 MTLGSRender::~MTLGSRender()
 {
+	stop_watchdog();
+
 	if (zcull_ctrl.get() == static_cast<::rsx::reports::ZCULL_control*>(this))
 	{
 		zcull_ctrl.release();
@@ -49,6 +52,11 @@ void MTLGSRender::on_init_thread()
 	GSRender::on_init_thread();
 
 	m_frame_pool = mtl::autorelease_push();
+
+	mtl::g_is_rsx_thread = true;
+	m_last_flip_time = get_system_time();
+	m_watchdog_stop = false;
+	m_watchdog = std::make_unique<std::thread>([this]() { watchdog_loop(); });
 
 	std::string device_name, error;
 
@@ -109,6 +117,8 @@ void MTLGSRender::on_init_thread()
 
 void MTLGSRender::on_exit()
 {
+	stop_watchdog();
+
 	if (zcull_ctrl.get() == static_cast<::rsx::reports::ZCULL_control*>(this))
 	{
 		// Queries live in device resources that are released below
@@ -839,6 +849,8 @@ void MTLGSRender::flip(const rsx::display_flip_info_t& info)
 	mtl::autorelease_pop(m_frame_pool);
 	m_frame_pool = mtl::autorelease_push();
 
+	m_last_flip_time = get_system_time();
+
 	rsx::thread::flip(info);
 }
 
@@ -934,4 +946,80 @@ void MTLGSRender::discard_occlusion_query(rsx::reports::occlusion_query_info* qu
 	}
 
 	mtl::occlusion_release(m_occlusion_map[query->driver_handle]);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Hang watchdog (diagnostics)
+// ---------------------------------------------------------------------------------------------
+
+namespace mtl
+{
+	rsx_op_stack g_rsx_ops;
+	thread_local bool g_is_rsx_thread = false;
+}
+
+void MTLGSRender::watchdog_loop()
+{
+	u64 reported_flip = 0;
+	u64 last_report = 0;
+
+	while (!m_watchdog_stop)
+	{
+		std::this_thread::sleep_for(std::chrono::milliseconds(250));
+
+		const u64 now = get_system_time();
+		const u64 last_flip = m_last_flip_time;
+
+		if (Emu.IsPaused() || now - last_flip < 2'000'000)
+		{
+			continue;
+		}
+
+		// Report once when the stall starts, then every 5 s while it lasts
+		if (reported_flip == last_flip && now - last_report < 5'000'000)
+		{
+			continue;
+		}
+
+		reported_flip = last_flip;
+		last_report = now;
+
+		std::string ops;
+		const u32 depth = std::min(mtl::g_rsx_ops.depth.load(), mtl::rsx_op_stack::max_depth);
+		for (u32 i = 0; i < depth; ++i)
+		{
+			const char* what = mtl::g_rsx_ops.what[i];
+			fmt::append(ops, "%s%s (%llu ms)", i ? " > " : "", what ? what : "?", (now - mtl::g_rsx_ops.start[i]) / 1000);
+		}
+
+		u32 get = 0, put = 0;
+		if (ctrl)
+		{
+			get = ctrl->get;
+			put = ctrl->put;
+		}
+
+		usz pending = 0;
+		if (std::unique_lock lock(m_queue_guard, std::try_to_lock); lock)
+		{
+			for (auto& q : m_work_queue)
+			{
+				pending += !q.processed;
+			}
+		}
+
+		rsx_log.error("Metal watchdog: no frame for %llu ms. RSX thread in: [%s]. FIFO get=0x%x put=0x%x%s, unprocessed flush requests: %u",
+			(now - last_flip) / 1000, ops.empty() ? std::string("no tracked operation") : ops, get, put,
+			get == put ? " (idle, waiting for the game)" : "", pending);
+	}
+}
+
+void MTLGSRender::stop_watchdog()
+{
+	if (m_watchdog)
+	{
+		m_watchdog_stop = true;
+		m_watchdog->join();
+		m_watchdog.reset();
+	}
 }

@@ -11,10 +11,24 @@
 #include <unordered_set>
 
 #include <list>
+#include <memory>
+#include <thread>
 
 namespace mtl
 {
 	struct presenter;
+
+	// Operations in progress on the RSX thread, readable by the hang watchdog (diagnostics only)
+	struct rsx_op_stack
+	{
+		static constexpr u32 max_depth = 16;
+		atomic_t<const char*> what[max_depth]{};
+		atomic_t<u64> start[max_depth]{};
+		atomic_t<u32> depth = 0;
+	};
+
+	extern rsx_op_stack g_rsx_ops;
+	extern thread_local bool g_is_rsx_thread;
 
 	// Logs RSX-thread operations that take long enough to stall the guest (diagnostics)
 	struct stall_probe
@@ -22,11 +36,31 @@ namespace mtl
 		const char* what;
 		u64 threshold_us;
 		u64 start = get_system_time();
+		bool tracked = false;
 
-		explicit stall_probe(const char* what, u64 threshold_us = 15'000) : what(what), threshold_us(threshold_us) {}
+		explicit stall_probe(const char* what, u64 threshold_us = 15'000) : what(what), threshold_us(threshold_us)
+		{
+			if (g_is_rsx_thread)
+			{
+				const u32 depth = g_rsx_ops.depth;
+				if (depth < rsx_op_stack::max_depth)
+				{
+					g_rsx_ops.what[depth] = what;
+					g_rsx_ops.start[depth] = start;
+				}
+
+				g_rsx_ops.depth = depth + 1;
+				tracked = true;
+			}
+		}
 
 		~stall_probe()
 		{
+			if (tracked)
+			{
+				g_rsx_ops.depth = g_rsx_ops.depth - 1;
+			}
+
 			if (const u64 elapsed = get_system_time() - start; elapsed >= threshold_us)
 			{
 				rsx_log.warning("Metal: slow %s: %llu ms", what, elapsed / 1000);
@@ -144,6 +178,13 @@ private:
 
 	u64 m_last_memory_report = 0;
 	void* m_frame_pool = nullptr; // RSX thread autorelease pool, drained every flip
+
+	// Hang watchdog: logs what the RSX thread is doing when no frame was presented for a while
+	atomic_t<u64> m_last_flip_time = 0;
+	atomic_t<bool> m_watchdog_stop = false;
+	std::unique_ptr<std::thread> m_watchdog;
+	void watchdog_loop();
+	void stop_watchdog();
 
 	void begin_occlusion_query(rsx::reports::occlusion_query_info* query) override;
 	void end_occlusion_query(rsx::reports::occlusion_query_info* query) override;
