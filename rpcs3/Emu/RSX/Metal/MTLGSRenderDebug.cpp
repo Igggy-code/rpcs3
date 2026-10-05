@@ -217,6 +217,16 @@ void MTLGSRender::dump_draw(const std::vector<mtl::resource_binding>& fs_texture
 		p.blend_enable, p.blend_factors, p.blend_ops, p.write_masks,
 		regs.depth_test_enabled(), regs.depth_write_enabled(), static_cast<int>(regs.depth_func()), regs.alpha_test_enabled()));
 
+	d.write(fmt::format("    vp origin %u,%u size %ux%u scale %.2f,%.2f,%.4f offset %.2f,%.2f,%.4f | scissor %u,%u %ux%u -> host %u,%u %ux%u | clip %u,%u %ux%u | zclip %.3f..%.3f | cull %d stencil %d alpha func %d ref %.3f | fp ctrl 0x%x\n",
+		regs.viewport_origin_x(), regs.viewport_origin_y(), regs.viewport_width(), regs.viewport_height(),
+		regs.viewport_scale_x(), regs.viewport_scale_y(), regs.viewport_scale_z(), regs.viewport_offset_x(), regs.viewport_offset_y(), regs.viewport_offset_z(),
+		regs.scissor_origin_x(), regs.scissor_origin_y(), regs.scissor_width(), regs.scissor_height(),
+		m_scissor.x1, m_scissor.y1, m_scissor.width(), m_scissor.height(),
+		regs.surface_clip_origin_x(), regs.surface_clip_origin_y(), regs.surface_clip_width(), regs.surface_clip_height(),
+		regs.clip_min(), regs.clip_max(), regs.cull_face_enabled() ? static_cast<int>(regs.cull_face_mode()) : 0,
+		regs.stencil_test_enabled(), regs.alpha_test_enabled() ? static_cast<int>(regs.alpha_func()) : -1, regs.alpha_ref(),
+		current_fragment_program.ctrl));
+
 	for (const auto& [program, is_vertex] : { std::pair{ &m_vertex_prog->result, true }, std::pair{ &m_fragment_prog->result, false } })
 	{
 		const u32 key = (program->id << 1) | (is_vertex ? 1 : 0);
@@ -244,6 +254,13 @@ void MTLGSRender::dump_draw(const std::vector<mtl::resource_binding>& fs_texture
 
 		const auto& tex = regs.fragment_textures[unit];
 		const auto state = static_cast<mtl::texture_cache::sampled_image_descriptor*>(fs_sampler_state[unit].get());
+
+		if (state)
+		{
+			const auto& p = current_fragment_program.texture_params[unit];
+			d.write(fmt::format("    %s params: scale %.4f,%.4f bias %.4f,%.4f control 0x%x remap 0x%x, zfunc %d\n", res.name,
+				p.scale[0], p.scale[1], p.bias[0], p.bias[1], p.control, p.remap, static_cast<int>(tex.zfunc())));
+		}
 
 		std::string line = fmt::format("    %s (dim %d depth %d): rsx 0x%08x fmt 0x%02x %ux%u mips %u, class %d ctx %d remap 0x%x -> ",
 			res.name, static_cast<int>(res.dimension), res.depth,
