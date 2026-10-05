@@ -13,6 +13,7 @@
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <utility>
 #include <unordered_map>
 #include <vector>
 
@@ -112,6 +113,20 @@ kernel void unpack_d24s8(device const uint* packed [[buffer(0)]], device float* 
 	const uint d24 = v >> 8;
 	z[i] = p.depth_float != 0 ? as_type<float>(d24 << 7) : float(d24) / 16777215.0f;
 	s[i] = uchar(v & 0xff);
+}
+
+// Endianness fix-up between formats with different guest element sizes (VK cs_shuffle_*):
+// mode 1 = byteswap 32, mode 2 = byteswap each 16-bit half, mode 3 = swap the 16-bit halves
+kernel void shuffle_words(device uint* data [[buffer(0)]], constant conv_params& p [[buffer(3)]], uint i [[thread_position_in_grid]])
+{
+	if (i >= p.count) return;
+	const uint v = data[i];
+	switch (p.depth_float)
+	{
+	case 1: data[i] = (v >> 24) | ((v >> 8) & 0xff00) | ((v << 8) & 0xff0000) | (v << 24); break;
+	case 2: data[i] = ((v & 0x00ff00ff) << 8) | ((v >> 8) & 0x00ff00ff); break;
+	default: data[i] = (v >> 16) | (v << 16); break;
+	}
 }
 
 kernel void pack_d16f(device ushort* packed [[buffer(0)]], device const float* z [[buffer(1)]],
@@ -292,6 +307,50 @@ fragment depth_out blit_depth_fs(vs_out in [[stage_in]], depth2d<float> tex [[te
 		}
 	}
 
+	// Guest byte order of a format, as vk::get_format_convert_flags: { byteswapped in guest memory, element size }
+	std::pair<bool, u32> get_guest_swap_unit(mtl::pixel_format format)
+	{
+		switch (format)
+		{
+		case mtl::pixel_format::r8:
+		case mtl::pixel_format::r8_uint:
+		case mtl::pixel_format::bc1:
+		case mtl::pixel_format::bc2:
+		case mtl::pixel_format::bc3:
+			return { false, 1 };
+		case mtl::pixel_format::bgra8:
+		case mtl::pixel_format::rgba8:
+		case mtl::pixel_format::r32f:
+		case mtl::pixel_format::r32_uint:
+		case mtl::pixel_format::rg32_uint:
+		case mtl::pixel_format::rgba32f:
+		case mtl::pixel_format::rgba32_uint:
+		case mtl::pixel_format::depth32f_stencil8:
+			return { true, 4 };
+		default:
+			return { true, 2 };
+		}
+	}
+
+	// 0 = none, otherwise a shuffle_words mode
+	u32 get_shuffle_mode(mtl::pixel_format src, mtl::pixel_format dst)
+	{
+		const auto a = get_guest_swap_unit(src);
+		const auto b = get_guest_swap_unit(dst);
+
+		if (!(a.first || b.first) || (a.first == b.first && a.second == b.second))
+		{
+			return 0;
+		}
+
+		if (a.first && b.first)
+		{
+			return 3;
+		}
+
+		return (a.first ? a.second : b.second) == 4 ? 1 : 2;
+	}
+
 	void dispatch_conversion(id<MTLComputeCommandEncoder> enc, id<MTLComputePipelineState> pso,
 		u32 packed_offset, u32 z_offset, u32 s_offset, u32 count, bool depth_float)
 	{
@@ -449,6 +508,13 @@ namespace mtl
 			return false;
 		}
 
+		const u32 shuffle_mode = get_shuffle_mode(src.format(), dst.format());
+		id<MTLComputePipelineState> shuffle = nil;
+		if (shuffle_mode && !(shuffle = get_compute_pipeline("shuffle_words")))
+		{
+			return false;
+		}
+
 		@autoreleasepool
 		{
 			internal::close_render_pass();
@@ -491,6 +557,20 @@ namespace mtl
 				id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
 				enc.label = @"RSX depth pack";
 				dispatch_conversion(enc, pack, packed_offset, z_offset, s_offset, src_w * height, options.src_depth_float);
+				[enc endEncoding];
+			}
+
+			if (shuffle)
+			{
+				// Keep the guest-visible bytes identical across element sizes
+				id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+				enc.label = @"RSX typeless shuffle";
+				const struct { u32 count; u32 mode; } params{ (row_bytes * height + 3) / 4, shuffle_mode };
+				[enc setComputePipelineState:shuffle];
+				[enc setBuffer:ring offset:packed_offset atIndex:0];
+				[enc setBytes:&params length:sizeof(params) atIndex:3];
+				const NSUInteger group = std::min<NSUInteger>(shuffle.maxTotalThreadsPerThreadgroup, 256);
+				[enc dispatchThreads:MTLSizeMake(params.count, 1, 1) threadsPerThreadgroup:MTLSizeMake(group, 1, 1)];
 				[enc endEncoding];
 			}
 
@@ -767,7 +847,7 @@ namespace mtl
 	{
 		std::lock_guard lock(s_ops_lock);
 
-		for (const char* name : { "pack_d24s8", "unpack_d24s8", "pack_d16f", "unpack_d16f" })
+		for (const char* name : { "pack_d24s8", "unpack_d24s8", "pack_d16f", "unpack_d16f", "shuffle_words" })
 		{
 			get_compute_pipeline(name);
 		}
