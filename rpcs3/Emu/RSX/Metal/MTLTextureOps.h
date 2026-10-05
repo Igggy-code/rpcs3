@@ -6,6 +6,7 @@
 #include "MTLDevice.h"
 
 #include <array>
+#include <memory>
 
 namespace mtl
 {
@@ -54,6 +55,31 @@ namespace mtl
 	// Synchronous readback of a 2D region into tightly packed CPU memory (submits and waits)
 	bool download_texture(texture& src, u32 level, u32 layer, u32 x, u32 y, u32 width, u32 height,
 		image_aspect aspect, void* dst, u32 dst_bytes_per_row);
+
+	// Asynchronous readback of a 2D region: the copy is recorded in the pending command buffer and
+	// wait() submits it if needed and blocks until the GPU is done. Rows are tightly packed.
+	class readback
+	{
+	public:
+		readback() = default;
+		readback(const readback&) = delete;
+		readback& operator=(const readback&) = delete;
+		~readback();
+
+		bool wait();
+		const u8* data() const;
+		u32 row_bytes() const { return m_row_bytes; }
+
+	private:
+		friend std::unique_ptr<readback> begin_readback(texture&, u32, u32, u32, u32, u32, u32, image_aspect);
+
+		void* m_buffer = nullptr; // Retained id<MTLBuffer>
+		void* m_cmd = nullptr;    // Retained id<MTLCommandBuffer>
+		u32 m_row_bytes = 0;
+		bool m_done = false;
+	};
+
+	std::unique_ptr<readback> begin_readback(texture& src, u32 level, u32 layer, u32 x, u32 y, u32 width, u32 height, image_aspect aspect);
 
 	enum class sampler_filter : u8 { nearest = 0, linear = 1 };
 	enum class sampler_mip_filter : u8 { none = 0, nearest = 1, linear = 2 };

@@ -9,6 +9,17 @@
 
 namespace mtl
 {
+	struct guest_readback
+	{
+		std::unique_ptr<readback> main;
+		std::unique_ptr<readback> stencil;
+		pixel_format format = pixel_format::invalid;
+		u32 width = 0, height = 0;
+		u32 out_offset = 0, out_pitch = 0, guest_bpp = 0;
+		bool is_float = false;
+	};
+
+
 	namespace
 	{
 		// Bytes per pixel of a surface/texture as stored in guest memory
@@ -81,31 +92,63 @@ namespace mtl
 			}
 		}
 
-		// Reads a region of 'src' into guest (big-endian) layout
-		void read_guest_pixels(texture& src, u32 x, u32 y, u32 width, u32 height, u8* out, u32 out_pitch, u32 guest_bpp, bool is_float)
+		// Reads a region of 'src' into guest (big-endian) layout. begin_guest_readback records the GPU copies;
+		// finish_guest_readback waits for them and converts into the destination.
+		std::shared_ptr<guest_readback> begin_guest_readback(texture& src, u32 x, u32 y, u32 width, u32 height,
+			u32 out_offset, u32 out_pitch, u32 guest_bpp, bool is_float)
 		{
-			const u32 texels = width * height;
+			auto job = std::make_shared<guest_readback>();
+			job->format = src.format();
+			job->width = width;
+			job->height = height;
+			job->out_offset = out_offset;
+			job->out_pitch = out_pitch;
+			job->guest_bpp = guest_bpp;
+			job->is_float = is_float;
 
-			switch (src.format())
+			const auto aspect = src.is_depth() ? image_aspect::depth : image_aspect::color;
+			job->main = begin_readback(src, 0, 0, x, y, width, height, aspect);
+
+			if (src.format() == pixel_format::depth32f_stencil8)
+			{
+				job->stencil = begin_readback(src, 0, 0, x, y, width, height, image_aspect::stencil);
+			}
+
+			return job;
+		}
+
+		void finish_guest_readback(guest_readback& job, u8* out_base)
+		{
+			if (!job.main || !job.main->wait() || (job.stencil && !job.stencil->wait()))
+			{
+				rsx_log.error("Metal: GPU readback failed");
+				return;
+			}
+
+			const u32 width = job.width;
+			const u32 height = job.height;
+			u8* out = out_base + job.out_offset;
+			const u8* src_data = job.main->data();
+			const u32 src_pitch = job.main->row_bytes();
+
+			switch (job.format)
 			{
 			case pixel_format::depth32f_stencil8:
 			{
-				std::vector<f32> depth_data(texels);
-				std::vector<u8> stencil_data(texels);
-
-				download_texture(src, 0, 0, x, y, width, height, image_aspect::depth, depth_data.data(), width * 4);
-				download_texture(src, 0, 0, x, y, width, height, image_aspect::stencil, stencil_data.data(), width);
+				const u8* stencil_data = job.stencil->data();
+				const u32 stencil_pitch = job.stencil->row_bytes();
 
 				for (u32 row = 0; row < height; ++row)
 				{
-					auto dst = reinterpret_cast<be_t<u32>*>(out + static_cast<usz>(row) * out_pitch);
+					auto dst = reinterpret_cast<be_t<u32>*>(out + static_cast<usz>(row) * job.out_pitch);
+					auto depth_row = reinterpret_cast<const f32*>(src_data + static_cast<usz>(row) * src_pitch);
+					auto stencil_row = stencil_data + static_cast<usz>(row) * stencil_pitch;
 
 					for (u32 col = 0; col < width; ++col)
 					{
-						const u32 index = row * width + col;
-						const f32 d = std::clamp(depth_data[index], 0.f, 1.f);
-						const u32 d24 = is_float ? (std::bit_cast<u32>(d) >> 7) & 0xffffff : static_cast<u32>(d * 16777215.f);
-						dst[col] = (d24 << 8) | stencil_data[index];
+						const f32 d = std::clamp(depth_row[col], 0.f, 1.f);
+						const u32 d24 = job.is_float ? (std::bit_cast<u32>(d) >> 7) & 0xffffff : static_cast<u32>(d * 16777215.f);
+						dst[col] = (d24 << 8) | stencil_row[col];
 					}
 				}
 				break;
@@ -113,16 +156,14 @@ namespace mtl
 
 			case pixel_format::depth32f:
 			{
-				std::vector<f32> depth_data(texels);
-				download_texture(src, 0, 0, x, y, width, height, image_aspect::depth, depth_data.data(), width * 4);
-
 				for (u32 row = 0; row < height; ++row)
 				{
-					auto dst = reinterpret_cast<be_t<u16>*>(out + static_cast<usz>(row) * out_pitch);
+					auto dst = reinterpret_cast<be_t<u16>*>(out + static_cast<usz>(row) * job.out_pitch);
+					auto depth_row = reinterpret_cast<const f32*>(src_data + static_cast<usz>(row) * src_pitch);
 
 					for (u32 col = 0; col < width; ++col)
 					{
-						dst[col] = float_to_half(depth_data[row * width + col]);
+						dst[col] = float_to_half(depth_row[col]);
 					}
 				}
 				break;
@@ -130,11 +171,9 @@ namespace mtl
 
 			default:
 			{
-				download_texture(src, 0, 0, x, y, width, height, image_aspect::color, out, out_pitch);
-
 				// Guest memory is big-endian
 				u32 swap_size = 0;
-				switch (src.format())
+				switch (job.format)
 				{
 				case pixel_format::bgra8:
 				case pixel_format::rgba8:
@@ -157,22 +196,28 @@ namespace mtl
 					break;
 				}
 
-				const u32 row_bytes = width * guest_bpp;
-				for (u32 row = 0; row < height && swap_size; ++row)
+				const u32 row_bytes = std::min(width * job.guest_bpp, src_pitch);
+				for (u32 row = 0; row < height; ++row)
 				{
-					u8* data = out + static_cast<usz>(row) * out_pitch;
+					u8* data = out + static_cast<usz>(row) * job.out_pitch;
+					const u8* in = src_data + static_cast<usz>(row) * src_pitch;
 
 					if (swap_size == 4)
 					{
-						copy_data_swap_u32(reinterpret_cast<u32*>(data), reinterpret_cast<const u32*>(data), row_bytes / 4);
+						copy_data_swap_u32(reinterpret_cast<u32*>(data), reinterpret_cast<const u32*>(in), row_bytes / 4);
+					}
+					else if (swap_size == 2)
+					{
+						auto words_out = reinterpret_cast<u16*>(data);
+						auto words_in = reinterpret_cast<const u16*>(in);
+						for (u32 i = 0; i < row_bytes / 2; ++i)
+						{
+							words_out[i] = std::byteswap(words_in[i]);
+						}
 					}
 					else
 					{
-						auto words = reinterpret_cast<u16*>(data);
-						for (u32 i = 0; i < row_bytes / 2; ++i)
-						{
-							words[i] = std::byteswap(words[i]);
-						}
+						std::memcpy(data, in, row_bytes);
 					}
 				}
 				break;
@@ -434,7 +479,9 @@ namespace mtl
 		if (transfer_width && transfer_height)
 		{
 			u8* out = m_flush_buffer.data() + static_cast<usz>(transfer_y) * real_pitch + static_cast<usz>(transfer_x) * guest_bpp;
-			read_guest_pixels(*target_texture, transfer_x, transfer_y, transfer_width, transfer_height, out, real_pitch, guest_bpp, gcm_format == CELL_GCM_TEXTURE_DEPTH24_D8_FLOAT);
+			// The copy runs on the GPU in submission order; the CPU side waits only when the data is needed
+			m_pending_readback = begin_guest_readback(*target_texture, transfer_x, transfer_y, transfer_width, transfer_height,
+				static_cast<u32>(out - m_flush_buffer.data()), real_pitch, guest_bpp, gcm_format == CELL_GCM_TEXTURE_DEPTH24_D8_FLOAT);
 		}
 
 		synchronized = true;
@@ -465,7 +512,7 @@ namespace mtl
 
 		if (w && h)
 		{
-			read_guest_pixels(*src, x, y, std::min(w, pitch / guest_bpp), h, m_flush_buffer.data() + offset, pitch, guest_bpp, gcm_format == CELL_GCM_TEXTURE_DEPTH24_D8_FLOAT);
+			m_pending_readback = begin_guest_readback(*src, x, y, std::min(w, pitch / guest_bpp), h, offset, pitch, guest_bpp, gcm_format == CELL_GCM_TEXTURE_DEPTH24_D8_FLOAT);
 		}
 
 		synchronized = true;
@@ -475,6 +522,12 @@ namespace mtl
 	void* cached_texture_section::map_synchronized(u32 offset, u32 size)
 	{
 		ensure(synchronized);
+
+		if (m_pending_readback)
+		{
+			finish_guest_readback(*m_pending_readback, m_flush_buffer.data());
+			m_pending_readback.reset();
+		}
 		ensure(static_cast<usz>(offset) + size <= m_flush_buffer.size());
 		return m_flush_buffer.data() + offset;
 	}
@@ -509,13 +562,14 @@ namespace mtl
 
 	void cached_texture_section::destroy()
 	{
-		if (!is_locked() && vram_texture == nullptr && !managed_texture && m_flush_buffer.empty())
+		if (!is_locked() && vram_texture == nullptr && !managed_texture && m_flush_buffer.empty() && !m_pending_readback)
 		{
 			// Already destroyed
 			return;
 		}
 
 		m_flush_buffer = {};
+		m_pending_readback.reset();
 		managed_texture.reset();
 		vram_texture = nullptr;
 

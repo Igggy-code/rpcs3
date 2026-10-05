@@ -28,20 +28,23 @@ namespace mtl
 
 	// Result of translating one RSX program: GLSL (from the Vulkan decompiler) -> SPIR-V -> MSL.
 	// The MSL -> MTLFunction step is the expensive one; it runs when a pipeline is first built.
+	// GLSL -> SPIR-V -> MSL -> MTLFunction runs once, on first use (usually on a pipeline compiler thread):
+	// only the decompilation happens on the RSX thread. 'msl', 'entry' and 'resources' are written once,
+	// before get_function() returns; draws read them only through a pipeline built from them.
 	struct translated_program
 	{
 		u32 id = 0;
 		bool is_vertex = false;
 		std::string glsl;
-		std::string msl;
-		std::string entry;
-		std::string error;     // Empty on success
+		mutable std::string msl;
+		mutable std::string entry;
+		mutable std::string error;     // Empty on success
 		std::shared_ptr<lazy_function> compiled = std::make_shared<lazy_function>();
-		std::vector<shader_resource> resources;
+		mutable std::vector<shader_resource> resources;
 
-		bool ok() const { return error.empty() && !msl.empty(); }
+		bool ok() const { return !glsl.empty(); }
 
-		// Thread-safe; returns nullptr if the MSL does not compile (logged once)
+		// Thread-safe; returns nullptr if translation or compilation fails (logged once)
 		const shader_function* get_function() const;
 	};
 

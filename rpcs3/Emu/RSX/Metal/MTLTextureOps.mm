@@ -828,6 +828,96 @@ namespace mtl
 		return true;
 	}
 
+	readback::~readback()
+	{
+		if (m_buffer) CFRelease(m_buffer);
+		if (m_cmd) CFRelease(m_cmd);
+	}
+
+	bool readback::wait()
+	{
+		if (m_done)
+		{
+			return m_buffer != nullptr;
+		}
+
+		m_done = true;
+
+		if (!m_cmd)
+		{
+			return false;
+		}
+
+		@autoreleasepool
+		{
+			id<MTLCommandBuffer> cmd = (__bridge id<MTLCommandBuffer>)m_cmd;
+
+			if (cmd.status == MTLCommandBufferStatusNotEnqueued)
+			{
+				// Still the pending command buffer
+				flush();
+			}
+
+			[cmd waitUntilCompleted];
+			return cmd.status == MTLCommandBufferStatusCompleted;
+		}
+	}
+
+	const u8* readback::data() const
+	{
+		return m_buffer ? static_cast<const u8*>(((__bridge id<MTLBuffer>)m_buffer).contents) : nullptr;
+	}
+
+	std::unique_ptr<readback> begin_readback(texture& src, u32 level, u32 layer, u32 x, u32 y, u32 width, u32 height, image_aspect aspect)
+	{
+		if (!src.valid() || !width || !height || is_compressed_format(src.format()))
+		{
+			return {};
+		}
+
+		u32 bpp = src.block_size();
+		if (has_stencil(src.format()))
+		{
+			bpp = aspect == image_aspect::stencil ? 1 : 4;
+		}
+
+		auto result = std::make_unique<readback>();
+		result->m_row_bytes = width * bpp;
+
+		@autoreleasepool
+		{
+			id<MTLBuffer> staging = [internal::device() newBufferWithLength:result->m_row_bytes * height options:MTLResourceStorageModeShared];
+			if (!staging)
+			{
+				return {};
+			}
+
+			internal::close_render_pass();
+
+			id<MTLCommandBuffer> cmd = internal::command_buffer();
+			id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
+			blit.label = @"RSX async readback";
+
+			[blit copyFromTexture:as_mtl(src)
+				sourceSlice:slice_of(src, layer)
+				sourceLevel:level
+				sourceOrigin:MTLOriginMake(x, y, 0)
+				sourceSize:MTLSizeMake(width, height, 1)
+				toBuffer:staging
+				destinationOffset:0
+				destinationBytesPerRow:result->m_row_bytes
+				destinationBytesPerImage:0
+				options:blit_option(src, aspect)];
+
+			[blit endEncoding];
+
+			result->m_buffer = (__bridge_retained void*)staging;
+			result->m_cmd = (__bridge_retained void*)cmd;
+		}
+
+		return result;
+	}
+
 	void* get_sampler(const sampler_desc& d)
 	{
 		std::lock_guard lock(s_ops_lock);

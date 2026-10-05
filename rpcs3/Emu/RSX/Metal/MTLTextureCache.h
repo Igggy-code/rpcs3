@@ -15,6 +15,7 @@ namespace mtl
 {
 	class cached_texture_section;
 	class texture_cache;
+	struct guest_readback;
 
 	struct texture_cache_traits
 	{
@@ -44,8 +45,10 @@ namespace mtl
 		viewable_image* vram_texture = nullptr;
 		std::unique_ptr<viewable_image> managed_texture;
 
-		// Guest-layout copy of the image for CPU readback (filled by copy_texture)
+		// Guest-layout copy of the image for CPU readback (filled by copy_texture; the GPU copy completes
+		// asynchronously and is converted on first map_synchronized)
 		std::vector<u8> m_flush_buffer;
+		std::shared_ptr<guest_readback> m_pending_readback;
 
 	public:
 		using baseclass::cached_texture_section;

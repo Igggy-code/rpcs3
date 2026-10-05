@@ -29,11 +29,35 @@ namespace mtl
 			compiled->attempted = true;
 
 			const u64 start = get_system_time();
-			if (!compiled->function.create(msl, entry, compiled->error))
+			const char* const kind = is_vertex ? "Vertex" : "Fragment";
+			const auto stage = is_vertex ? shader_stage::vertex : shader_stage::fragment;
+			const auto domain = is_vertex ? ::glsl::program_domain::glsl_vertex_program : ::glsl::program_domain::glsl_fragment_program;
+
+			std::vector<u32> spirv;
+			std::string source = glsl; // compile_glsl_to_spv takes a mutable string
+
+			if (!spirv::compile_glsl_to_spv(spirv, source, domain, ::glsl::glsl_rules_vulkan))
+			{
+				error = "GLSL -> SPIR-V failed";
+			}
+			else if (spirv_to_msl(spirv, stage, msl, entry, resources, error))
+			{
+				if (g_cfg.video.log_programs)
+				{
+					fs::write_file(fs::get_cache_dir() + fmt::format("shaderlog/Metal%sProgram%u.metal", kind, id), fs::rewrite, msl);
+				}
+
+				if (!compiled->function.create(msl, entry, compiled->error))
+				{
+					error = "Metal compilation failed: " + compiled->error;
+				}
+			}
+
+			if (!error.empty())
 			{
 				g_programs_failed++;
-				rsx_log.error("Metal: %s program %u: Metal compilation failed: %s", is_vertex ? "Vertex" : "Fragment", id, compiled->error);
-				rsx_log.notice("Metal: failing MSL:\n%s", msl);
+				rsx_log.error("Metal: %s program %u: %s", kind, id, error);
+				rsx_log.notice("Metal: failing %s:\n%s", msl.empty() ? "GLSL" : "MSL", msl.empty() ? glsl : msl);
 			}
 			else
 			{
@@ -42,7 +66,7 @@ namespace mtl
 
 			if (const u64 elapsed = get_system_time() - start; elapsed > 20'000)
 			{
-				rsx_log.notice("Metal: %s program %u compiled in %llu ms", is_vertex ? "vertex" : "fragment", id, elapsed / 1000);
+				rsx_log.notice("Metal: %s program %u translated and compiled in %llu ms", kind, id, elapsed / 1000);
 			}
 		}
 
@@ -172,56 +196,15 @@ namespace mtl
 
 namespace
 {
-	void translate(const std::string& glsl, ::glsl::program_domain domain, mtl::shader_stage stage, u32 id, mtl::translated_program& out)
+	void translate(const std::string& glsl, ::glsl::program_domain, mtl::shader_stage stage, u32 id, mtl::translated_program& out)
 	{
 		out.id = id;
 		out.is_vertex = stage == mtl::shader_stage::vertex;
 		out.glsl = glsl;
 
-		const char* const kind = stage == mtl::shader_stage::vertex ? "Vertex" : "Fragment";
-
 		if (g_cfg.video.log_programs)
 		{
-			fs::write_file(fs::get_cache_dir() + fmt::format("shaderlog/Metal%sProgram%u.glsl", kind, id), fs::rewrite, glsl);
-		}
-
-		std::vector<u32> spirv;
-		std::string source = glsl; // compile_glsl_to_spv takes a mutable string
-
-		if (!spirv::compile_glsl_to_spv(spirv, source, domain, ::glsl::glsl_rules_vulkan))
-		{
-			out.error = "GLSL -> SPIR-V failed";
-		}
-		else if (!mtl::spirv_to_msl(spirv, stage, out.msl, out.entry, out.resources, out.error))
-		{
-			// error filled by spirv_to_msl
-		}
-		else
-		{
-			if (g_cfg.video.log_programs)
-			{
-				fs::write_file(fs::get_cache_dir() + fmt::format("shaderlog/Metal%sProgram%u.metal", kind, id), fs::rewrite, out.msl);
-			}
-		}
-
-		// Successes are counted when the Metal library is built (translated_program::get_function)
-		if (!out.error.empty())
-		{
-			mtl::g_programs_failed++;
-		}
-
-		if (!out.error.empty())
-		{
-			rsx_log.error("Metal: %s program %u: %s", kind, id, out.error);
-
-			if (!out.msl.empty())
-			{
-				rsx_log.notice("Metal: failing MSL:\n%s", out.msl);
-			}
-			else
-			{
-				rsx_log.notice("Metal: failing GLSL:\n%s", glsl);
-			}
+			fs::write_file(fs::get_cache_dir() + fmt::format("shaderlog/Metal%sProgram%u.glsl", out.is_vertex ? "Vertex" : "Fragment", id), fs::rewrite, glsl);
 		}
 	}
 }
