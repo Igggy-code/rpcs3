@@ -37,6 +37,7 @@ void MTLGSRender::dump_on_flip(mtl::render_target* presented)
 			m_dump->write("\n== flip: presented from guest memory (no surface)\n");
 		}
 
+		mtl::debug::g_frame_dump_active = false;
 		rsx_log.success("Metal: frame dump written to %s (%u passes, %u draws, %u images)", m_dump->dir, m_dump->pass, m_dump->draw, m_dump->images);
 		m_dump.reset();
 		return;
@@ -64,6 +65,7 @@ void MTLGSRender::dump_on_flip(mtl::render_target* presented)
 		!!g_cfg.video.read_color_buffers, !!g_cfg.video.write_color_buffers, !!g_cfg.video.read_depth_buffer, !!g_cfg.video.write_depth_buffer));
 
 	rsx_log.success("Metal: dumping the next frame to %s", dump->dir);
+	mtl::debug::g_frame_dump_active = true;
 	m_dump = std::move(dump);
 }
 

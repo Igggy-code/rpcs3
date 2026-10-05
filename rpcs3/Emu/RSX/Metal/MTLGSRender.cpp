@@ -1,5 +1,6 @@
 #include "stdafx.h"
 #include "MTLGSRender.h"
+#include "MTLDebugDump.h"
 #include "MTLPresenter.h"
 
 #include "Emu/IdManager.h"
@@ -286,6 +287,12 @@ bool MTLGSRender::on_access_violation(u32 address, bool is_writing)
 	{
 		std::lock_guard lock(m_sampler_mutex);
 		m_samplers_dirty.store(true);
+	}
+
+	if (mtl::debug::g_frame_dump_active)
+	{
+		rsx_log.notice("Metal dump: access violation at 0x%x (%s), handled %d, flushable %d, sections %u",
+			address, is_writing ? "write" : "read", result.violation_handled, result.num_flushable, ::size32(result.sections_to_flush));
 	}
 
 	if (!result.violation_handled)

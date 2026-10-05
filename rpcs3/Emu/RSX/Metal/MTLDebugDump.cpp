@@ -13,6 +13,8 @@
 
 namespace mtl::debug
 {
+	atomic_t<bool> g_frame_dump_active{false};
+
 	namespace
 	{
 		f32 half_to_float(u16 h)

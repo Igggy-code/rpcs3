@@ -8,6 +8,8 @@
 
 #include "MTLDevice.h"
 
+#include "util/atomic.hpp"
+
 #include <string>
 
 namespace mtl::debug
@@ -20,4 +22,7 @@ namespace mtl::debug
 	bool write_png(const std::string& path, u32 width, u32 height, u32 channels, const u8* data);
 
 	const char* format_name(pixel_format format);
+
+	// True while a frame dump is being recorded; transfer events are then logged ("Metal dump: ...")
+	extern atomic_t<bool> g_frame_dump_active;
 }

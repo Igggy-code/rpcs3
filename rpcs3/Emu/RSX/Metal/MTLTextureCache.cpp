@@ -1,5 +1,6 @@
 #include "stdafx.h"
 #include "MTLTextureCache.h"
+#include "MTLDebugDump.h"
 
 #include "Emu/RSX/Common/BufferUtils.h"
 #include "Emu/RSX/Utils/image_utils.hpp"
@@ -353,6 +354,13 @@ namespace mtl
 	void cached_texture_section::copy_texture(command_context& cmd, bool miss)
 	{
 		ensure(exists());
+
+		if (debug::g_frame_dump_active)
+		{
+			rsx_log.notice("Metal dump: flush section 0x%x-0x%x pitch %u, %ux%u, image %s, gcm 0x%x, context %d, swizzled %d, miss %d",
+				get_section_base(), get_section_base() + get_section_size() - 1, rsx_pitch, width, height,
+				debug::format_name(vram_texture->format()), gcm_format, static_cast<int>(context), is_swizzled(), miss);
+		}
 
 		if (!miss) [[likely]]
 		{
@@ -960,6 +968,12 @@ namespace mtl
 	{
 		auto section = create_new_texture(cmd, rsx_range, width, height, depth, mipmaps, pitch, gcm_format, context, type, input_swizzled,
 			rsx::component_order::default_, 0);
+
+		if (debug::g_frame_dump_active)
+		{
+			rsx_log.notice("Metal dump: upload from memory 0x%x-0x%x pitch %u, %ux%ux%u mips %u, gcm 0x%x, context %d, swizzled %d",
+				rsx_range.start, rsx_range.end, pitch, width, height, depth, mipmaps, gcm_format, static_cast<int>(context), input_swizzled);
+		}
 
 		mtl::upload_texture(section->get_raw_texture(), gcm_format, input_swizzled, subresource_layout);
 

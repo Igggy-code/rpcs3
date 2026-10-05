@@ -2,6 +2,7 @@
 #include "MTLRenderTargets.h"
 #include "MTLTextureOps.h"
 #include "MTLTexture.h"
+#include "MTLDebugDump.h"
 
 #include "Emu/Memory/vm.h"
 #include "Emu/system_config.h"
@@ -84,6 +85,11 @@ namespace mtl
 	void render_target::load_memory(command_context& /*cmd*/)
 	{
 		const bool is_swizzled = (raster_type == rsx::surface_raster_type::swizzle);
+
+		if (debug::g_frame_dump_active)
+		{
+			rsx_log.notice("Metal dump: surface load from memory 0x%x pitch %u, %ux%u, %s", base_addr, rsx_pitch, surface_width, surface_height, debug::format_name(format()));
+		}
 
 		rsx::subresource_layout subres{};
 		subres.width_in_block = subres.width_in_texel = static_cast<u16>(surface_width * samples_x);
