@@ -389,7 +389,23 @@ bool MTLGSRender::scaled_image_from_memory(const rsx::blit_src_info& src, const 
 	}
 
 	mtl::command_context cmd;
-	if (m_texture_cache.blit(cmd, src, dst, interpolate, m_rtts))
+	const bool handled = m_texture_cache.blit(cmd, src, dst, interpolate, m_rtts);
+
+	if (mtl::debug::g_frame_dump_active)
+	{
+		const auto text = fmt::format("blit src 0x%x fmt %d off %u,%u %ux%u pitch %u bpp %u -> dst 0x%x fmt %d off %u,%u %ux%u clip %u,%u %ux%u pitch %u bpp %u scale %.3f,%.3f swz %d: %s",
+			src.rsx_address, static_cast<int>(src.format), src.offset_x, src.offset_y, src.width, src.height, src.pitch, src.bpp,
+			dst.rsx_address, static_cast<int>(dst.format), dst.offset_x, dst.offset_y, dst.width, dst.height, dst.clip_x, dst.clip_y, dst.clip_width, dst.clip_height,
+			dst.pitch, dst.bpp, dst.scale_x, dst.scale_y, dst.swizzled, handled ? "GPU" : "CPU fallback");
+		rsx_log.notice("Metal dump: %s", text);
+
+		if (m_dump)
+		{
+			m_dump->write("  " + text + "\n");
+		}
+	}
+
+	if (handled)
 	{
 		m_samplers_dirty.store(true);
 		return true;
