@@ -1,6 +1,10 @@
 #include "stdafx.h"
 #include "MTLRenderTargets.h"
 #include "MTLTextureOps.h"
+#include "MTLTexture.h"
+
+#include "Emu/Memory/vm.h"
+#include "Emu/system_config.h"
 
 namespace mtl
 {
@@ -77,9 +81,48 @@ namespace mtl
 		fmt::throw_exception("Unknown surface depth format 0x%x", static_cast<u32>(format));
 	}
 
-	void render_target::initialize_memory(command_context& /*cmd*/, rsx::surface_access /*access*/)
+	void render_target::load_memory(command_context& /*cmd*/)
 	{
-		// TODO: load from guest memory when Read Color/Depth Buffers is enabled (needs format conversion uploads)
+		const bool is_swizzled = (raster_type == rsx::surface_raster_type::swizzle);
+
+		rsx::subresource_layout subres{};
+		subres.width_in_block = subres.width_in_texel = static_cast<u16>(surface_width * samples_x);
+		subres.height_in_block = subres.height_in_texel = static_cast<u16>(surface_height * samples_y);
+		subres.pitch_in_block = rsx_pitch / get_bpp();
+		subres.depth = 1;
+		subres.data = { vm::get_super_ptr<const std::byte>(base_addr), static_cast<std::span<const std::byte>::size_type>(rsx_pitch * surface_height * samples_y) };
+
+		if (width() == subres.width_in_block && height() == subres.height_in_block)
+		{
+			upload_texture(this, get_gcm_format(), is_swizzled, { subres });
+		}
+		else
+		{
+			// Resolution scaling: upload at native size, then scale into the surface
+			texture tmp(subres.width_in_block, subres.height_in_block, format(), usage_sampled | usage_render_target);
+			upload_texture(&tmp, get_gcm_format(), is_swizzled, { subres });
+
+			const blit_rect src_rect{ 0, 0, static_cast<int>(subres.width_in_block), static_cast<int>(subres.height_in_block) };
+			const blit_rect dst_rect{ 0, 0, static_cast<int>(width()), static_cast<int>(height()) };
+			blit_texture(tmp, 0, 0, src_rect, *this, 0, 0, dst_rect, !is_depth_surface());
+		}
+
+		state_flags &= ~(rsx::surface_state_flags::erase_bkgnd | rsx::surface_state_flags::force_data_load);
+		msaa_flags = rsx::surface_state_flags::ready;
+	}
+
+	void render_target::initialize_memory(command_context& cmd, rsx::surface_access /*access*/)
+	{
+		const bool read_buffers_config = is_depth_surface() ? !!g_cfg.video.read_depth_buffer : !!g_cfg.video.read_color_buffers;
+		const bool should_read_buffers = (state_flags & rsx::surface_state_flags::force_data_load) || read_buffers_config;
+
+		if (should_read_buffers)
+		{
+			// Guest memory holds the initial contents (written by the CPU/SPUs or an earlier flush)
+			load_memory(cmd);
+			return;
+		}
+
 		if (is_depth_surface())
 		{
 			clear_depth_stencil(*this, true, 1.f, has_stencil(format()), 0xff);

@@ -582,6 +582,21 @@ namespace mtl
 			MTLCompileOptions* options = [MTLCompileOptions new];
 			options.languageVersion = MTLLanguageVersion2_4;
 
+			// RSX programs move raw bits through floats (packed depth, UP4/PK4 conversions) and rely on IEEE
+			// NaN/Inf/denormal handling; fast math may reassociate or drop those.
+			if (@available(macOS 15.0, *))
+			{
+				options.mathMode = MTLMathModeSafe;
+				options.mathFloatingPointFunctions = MTLMathFloatingPointFunctionsPrecise;
+			}
+			else
+			{
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+				options.fastMathEnabled = NO;
+#pragma clang diagnostic pop
+			}
+
 			NSError* ns_error = nil;
 			id<MTLLibrary> library = [s_device newLibraryWithSource:@(msl.c_str()) options:options error:&ns_error];
 

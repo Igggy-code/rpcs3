@@ -497,7 +497,8 @@ namespace mtl
 			desc.max_anisotropy = 1;
 		}
 
-		const u32 texture_format = tex.format() & ~(CELL_GCM_TEXTURE_UN | CELL_GCM_TEXTURE_LN);
+		// Like VK: the effective format (a depth surface sampled as ARGB8 is not a shadow lookup)
+		const u32 texture_format = sampled_image ? sampled_image->format_ex.format() : (tex.format() & ~(CELL_GCM_TEXTURE_UN | CELL_GCM_TEXTURE_LN));
 		if (texture_format >= CELL_GCM_TEXTURE_DEPTH24_D8 && texture_format <= CELL_GCM_TEXTURE_DEPTH16_FLOAT)
 		{
 			desc.compare_enable = 1;

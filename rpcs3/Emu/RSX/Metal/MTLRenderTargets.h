@@ -33,6 +33,7 @@ namespace mtl
 	class render_target : public viewable_image, public rsx::render_target_descriptor<texture*>
 	{
 		void initialize_memory(command_context& cmd, rsx::surface_access access);
+		void load_memory(command_context& cmd);
 
 	public:
 		render_target(u32 width, u32 height, pixel_format format, rsx::format_class format_class)
