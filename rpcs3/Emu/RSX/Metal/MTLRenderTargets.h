@@ -385,6 +385,20 @@ struct mtl_render_target_traits
 
 struct mtl_render_targets : public rsx::surface_store<mtl_render_target_traits>
 {
+	// Debugging: visits every color and depth surface
+	template <typename F>
+	void for_each_surface(F&& func)
+	{
+		const auto all = rsx::address_range32::start_end(0, 0xfffffffe);
+		for (auto data : { &m_render_targets_storage, &m_depth_stencil_storage })
+		{
+			for (auto it = data->begin_range(all); it != data->end(); ++it)
+			{
+				func(it->first, mtl_render_target_traits::get(it->second));
+			}
+		}
+	}
+
 	void destroy()
 	{
 		invalidate_all();

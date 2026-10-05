@@ -4,6 +4,9 @@
 
 #include "Emu/RSX/rsx_methods.h"
 #include "Utilities/File.h"
+#include "Emu/Memory/vm.h"
+
+#include <cmath>
 
 #include <chrono>
 
@@ -25,6 +28,62 @@ void MTLGSRender::dump_on_flip(mtl::render_target* presented)
 	{
 		// Last pass of the frame and the presented image
 		dump_bound_surfaces("end of frame");
+
+		// Surfaces in main memory are usually exchanged with the CPU/SPUs (post-processing inputs and outputs)
+		fs::create_path(m_dump->dir + "/memory_surfaces");
+		m_dump->write("\n== surfaces in main memory at the end of the frame\n");
+		m_rtts.for_each_surface([&](u32 address, mtl::render_target* surface)
+		{
+			if (address >= 0xc0000000)
+			{
+				return;
+			}
+
+			const std::string name = fmt::format("memory_surfaces/0x%08x_%s_%ux%u_pitch%u", address,
+				mtl::debug::format_name(surface->format()), surface->width(), surface->height(), surface->get_rsx_pitch());
+			const auto result = mtl::debug::dump_texture(*surface, m_dump->dir + "/" + name, true);
+			m_dump->images++;
+			m_dump->write(fmt::format("  %s: %s\n", name, result));
+
+			// What the CPU/SPUs see in guest memory: as big-endian ARGB8 and as big-endian FP16 RGBA
+			const u32 pitch = surface->get_rsx_pitch();
+			const u32 w = surface->get_surface_width<rsx::surface_metrics::pixels>();
+			const u32 h = surface->get_surface_height<rsx::surface_metrics::pixels>();
+			if (surface->get_bpp() == 4 && pitch >= w * 4 && vm::check_addr(address, vm::page_readable, pitch * h))
+			{
+				const u8* mem = vm::get_super_ptr<const u8>(address);
+				std::vector<u8> argb(static_cast<usz>(w) * h * 3), fp16(static_cast<usz>(w / 2) * h * 3);
+
+				const auto half = [](const u8* p)
+				{
+					const u16 v = static_cast<u16>((p[0] << 8) | p[1]);
+					const u32 e = (v >> 10) & 0x1f, m = v & 0x3ff;
+					const f32 f = e == 0 ? m / 16777216.f : std::ldexp(1.f + m / 1024.f, static_cast<int>(e) - 15);
+					return static_cast<u8>(std::clamp((v & 0x8000) ? 0.f : f, 0.f, 1.f) * 255.f);
+				};
+
+				for (u32 y = 0; y < h; ++y)
+				{
+					const u8* row = mem + static_cast<usz>(y) * pitch;
+					for (u32 x = 0; x < w; ++x)
+					{
+						const u8* p = row + x * 4;
+						u8* o = &argb[(static_cast<usz>(y) * w + x) * 3];
+						o[0] = p[1]; o[1] = p[2]; o[2] = p[3];
+					}
+
+					for (u32 x = 0; x < w / 2; ++x)
+					{
+						const u8* p = row + x * 8;
+						u8* o = &fp16[(static_cast<usz>(y) * (w / 2) + x) * 3];
+						o[0] = half(p); o[1] = half(p + 2); o[2] = half(p + 4);
+					}
+				}
+
+				mtl::debug::write_png(m_dump->dir + "/" + name + "_guest_argb8.png", w, h, 3, argb.data());
+				mtl::debug::write_png(m_dump->dir + "/" + name + "_guest_fp16.png", w / 2, h, 3, fp16.data());
+			}
+		});
 
 		if (presented)
 		{
