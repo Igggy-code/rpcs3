@@ -431,13 +431,14 @@ namespace mtl
 		struct occlusion_pool
 		{
 			std::vector<u32> free_slots;
-			std::vector<id<MTLCommandBuffer>> users = std::vector<id<MTLCommandBuffer>>(occlusion_slot_count);
+			std::vector<id<MTLCommandBuffer>> users;
 			bool initialized = false;
 
 			void init()
 			{
 				if (initialized) return;
 				initialized = true;
+				users.resize(occlusion_slot_count);
 				free_slots.reserve(occlusion_slot_count);
 				for (u32 i = occlusion_slot_count; i-- > 0;) free_slots.push_back(i);
 			}
