@@ -418,6 +418,18 @@ void MTLGSRender::bind_texture_env(std::vector<mtl::resource_binding>& vs_textur
 					b.texture_handle = view->native();
 					b.sampler_handle = stencil ? nullptr : m_fs_samplers[unit];
 				}
+				else if (view)
+				{
+					// Report each program/unit combination once: the draw samples a placeholder instead
+					static std::unordered_set<u64> s_reported;
+					const auto image = view->image();
+					if (s_reported.insert((u64{m_fragment_prog->id} << 8) | unit).second)
+					{
+						rsx_log.warning("Metal: fp %u %s: image (type %d, format %d, depth %d) does not match the declaration (dim %d, depth %d, ms %d); using a placeholder",
+							m_fragment_prog->id, res.name, static_cast<int>(image->type()), static_cast<int>(image->format()), image->is_depth(),
+							static_cast<int>(res.dimension), res.depth, res.multisampled);
+					}
+				}
 			}
 		}
 
@@ -1113,6 +1125,11 @@ void MTLGSRender::end()
 	{
 		mtl::stall_probe probe("bind_texture_env");
 		bind_texture_env(env.vs_textures, env.fs_textures);
+	}
+
+	if (m_dump)
+	{
+		dump_draw(env.fs_textures);
 	}
 
 	auto& draw_call = rsx::method_registers.current_draw_clause;

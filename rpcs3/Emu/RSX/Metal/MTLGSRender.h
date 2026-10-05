@@ -6,6 +6,9 @@
 #include "MTLTextureCache.h"
 
 #include "Emu/Cell/timers.hpp"
+#include "Utilities/File.h"
+
+#include <unordered_set>
 
 #include <list>
 
@@ -134,4 +137,30 @@ private:
 
 	shared_mutex m_queue_guard;
 	std::list<mtl::work_item> m_work_queue;
+
+	// Frame dump for debugging (MTLGSRenderDebug.cpp, see MTLDebugDump.h)
+	struct frame_dump
+	{
+		std::string dir;
+		fs::file log;
+		u32 pass = 0;
+		u32 draw = 0;
+		u32 images = 0;
+		std::array<u32, 6> pass_key{};
+		std::unordered_set<const void*> dumped_textures;
+		std::unordered_set<u32> dumped_programs;
+
+		void write(const std::string& text)
+		{
+			log.write(text);
+		}
+	};
+
+	std::unique_ptr<frame_dump> m_dump;
+
+	void dump_on_flip(mtl::render_target* presented);
+	void dump_bound_surfaces(const char* reason);
+	void dump_on_framebuffer_change();
+	void dump_clear(u32 arg);
+	void dump_draw(const std::vector<mtl::resource_binding>& fs_textures);
 };

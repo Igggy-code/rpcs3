@@ -103,7 +103,9 @@ endif()
 option(USE_METAL "Build the native Metal renderer (macOS only)" ON)
 if(APPLE AND USE_METAL AND TARGET 3rdparty_vulkan)
     target_sources(rpcs3_emu PRIVATE
+        RSX/Metal/MTLDebugDump.cpp
         RSX/Metal/MTLGSRender.cpp
+        RSX/Metal/MTLGSRenderDebug.cpp
         RSX/Metal/MTLGSRenderDraw.cpp
         RSX/Metal/MTLProgram.cpp
         RSX/Metal/MTLRenderTargets.cpp

@@ -123,6 +123,11 @@ void MTLGSRender::init_buffers(rsx::framebuffer_creation_context context)
 		return;
 	}
 
+	if (m_dump)
+	{
+		dump_on_framebuffer_change();
+	}
+
 	mtl::command_context cmd;
 	m_rtts.prepare_render_target(cmd,
 		m_framebuffer_layout.color_format, m_framebuffer_layout.depth_format,
@@ -404,6 +409,11 @@ void MTLGSRender::clear_surface(u32 arg)
 
 	init_buffers(static_cast<rsx::framebuffer_creation_context>(ctx));
 
+	if (m_dump)
+	{
+		dump_clear(arg);
+	}
+
 	if (!m_graphics_state.test(rsx::rtt_config_valid)) return;
 
 	bool update_color = false, update_z = false;
@@ -610,11 +620,22 @@ void MTLGSRender::flip(const rsx::display_flip_info_t& info)
 			params.viewport_height = area.height();
 		}
 
+		if (m_dump)
+		{
+			dump_on_flip(const_cast<mtl::render_target*>(static_cast<const mtl::render_target*>(params.surface)));
+		}
+
 		mtl::present(m_presenter, params);
 	}
 	else if (m_device_ready)
 	{
 		mtl::flush();
+	}
+
+	if (m_device_ready && !m_dump)
+	{
+		// Starts a frame dump when requested (see MTLDebugDump.h)
+		dump_on_flip(nullptr);
 	}
 
 	if (m_device_ready)
