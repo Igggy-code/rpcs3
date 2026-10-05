@@ -147,6 +147,7 @@ private:
 	bool check_occlusion_query_status(rsx::reports::occlusion_query_info* query) override;
 	void get_occlusion_query_result(rsx::reports::occlusion_query_info* query) override;
 	void discard_occlusion_query(rsx::reports::occlusion_query_info* query) override;
+	void sync_hint(rsx::FIFO::interrupt_hint hint, rsx::reports::sync_hint_payload_t payload) override;
 
 	// Frame dump for debugging (MTLGSRenderDebug.cpp, see MTLDebugDump.h)
 	struct frame_dump

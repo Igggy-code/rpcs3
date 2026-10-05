@@ -176,12 +176,16 @@ namespace mtl
 	{
 		std::vector<u32> slots;
 		u64 pass_generation = ~0ull; // Render pass the last slot belongs to
+		u32 recorded = 0;            // Draws that counted into a slot
+		bool skipped = false;        // A draw of this query was not recorded (e.g. pipeline still compiling)
 	};
 
 	// True when every slot has been written by the GPU (false while a slot's command buffer is pending)
 	bool occlusion_ready(const occlusion_query& query);
 	// Waits for the GPU if needed, then returns the sum of passed samples (stops at the first hit if !precise)
 	u64 occlusion_result(const occlusion_query& query, bool precise);
+	// True when a slot belongs to the command buffer that has not been committed yet
+	bool occlusion_pending_submit(const occlusion_query& query);
 	// Returns the slots to the pool
 	void occlusion_release(occlusion_query& query);
 

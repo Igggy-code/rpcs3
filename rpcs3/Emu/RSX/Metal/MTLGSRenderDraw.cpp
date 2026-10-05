@@ -1059,6 +1059,21 @@ void MTLGSRender::end()
 
 	mtl::stall_probe probe_draw("draw");
 
+	// Detect draws of an active occlusion query that end up not being recorded
+	auto active_query = m_active_query;
+	const u32 recorded_before = active_query ? m_occlusion_map[active_query->driver_handle].recorded : 0;
+	const auto check_skipped = [&]()
+	{
+		if (active_query && m_active_query == active_query)
+		{
+			auto& data = m_occlusion_map[active_query->driver_handle];
+			if (data.recorded == recorded_before)
+			{
+				data.skipped = true;
+			}
+		}
+	};
+
 	{
 		mtl::stall_probe probe("init_buffers");
 		init_buffers(rsx::framebuffer_creation_context::context_draw);
@@ -1072,6 +1087,7 @@ void MTLGSRender::end()
 	if (!m_graphics_state.test(rsx::rtt_config_valid))
 	{
 		execute_nop_draw();
+		check_skipped();
 		rsx::thread::end();
 		return;
 	}
@@ -1093,6 +1109,7 @@ void MTLGSRender::end()
 	if (!program_ready)
 	{
 		execute_nop_draw();
+		check_skipped();
 		rsx::thread::end();
 		return;
 	}
@@ -1102,6 +1119,7 @@ void MTLGSRender::end()
 	{
 		rsx_log.error("Metal: out of ring memory for draw constants");
 		execute_nop_draw();
+		check_skipped();
 		rsx::thread::end();
 		return;
 	}
@@ -1151,5 +1169,6 @@ void MTLGSRender::end()
 
 	m_rtts.on_write(m_framebuffer_layout.color_write_enabled, m_framebuffer_layout.zeta_write_enabled);
 
+	check_skipped();
 	rsx::thread::end();
 }

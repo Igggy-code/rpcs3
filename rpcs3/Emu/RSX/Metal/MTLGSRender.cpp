@@ -827,25 +827,62 @@ bool MTLGSRender::check_occlusion_query_status(rsx::reports::occlusion_query_inf
 	}
 
 	const auto& data = m_occlusion_map[query->driver_handle];
-	return data.slots.empty() || mtl::occlusion_ready(data);
+	if (data.slots.empty())
+	{
+		return true;
+	}
+
+	if (mtl::occlusion_pending_submit(data))
+	{
+		// Still being recorded; the zcull sync hint submits it when the result is needed
+		return false;
+	}
+
+	return mtl::occlusion_ready(data);
 }
 
 void MTLGSRender::get_occlusion_query_result(rsx::reports::occlusion_query_info* query)
 {
 	auto& data = m_occlusion_map[query->driver_handle];
 
-	if (query->num_draws && !data.slots.empty())
+	if (query->num_draws)
 	{
-		if (!mtl::occlusion_ready(data))
+		u64 samples = 0;
+
+		if (!data.slots.empty())
 		{
-			rsx_log.trace("Metal: ZCULL read forced a GPU sync");
+			mtl::stall_probe probe("occlusion query read", 5000);
+			samples = mtl::occlusion_result(data, !!g_cfg.video.precise_zpass_count);
 		}
 
-		const u64 samples = mtl::occlusion_result(data, !!g_cfg.video.precise_zpass_count);
+		if (data.skipped)
+		{
+			// Draws skipped while their pipeline compiled count as visible: reporting them as occluded
+			// makes games hide objects (and conditional rendering drop draws)
+			samples += 0xffff;
+		}
+
 		query->result += static_cast<u32>(std::min<u64>(samples, 0xffffffffu));
 	}
 
 	mtl::occlusion_release(data);
+}
+
+void MTLGSRender::sync_hint(rsx::FIFO::interrupt_hint hint, rsx::reports::sync_hint_payload_t payload)
+{
+	rsx::thread::sync_hint(hint, payload);
+
+	if (hint != rsx::FIFO::interrupt_hint::zcull_sync || !payload.query || !m_device_ready)
+	{
+		return;
+	}
+
+	// The result is needed soon: submit the pending work now so the GPU finishes it before the read
+	if (mtl::occlusion_pending_submit(m_occlusion_map[payload.query->driver_handle]))
+	{
+		mtl::stall_probe probe("zcull submit", 5000);
+		mtl::flush();
+	}
 }
 
 void MTLGSRender::discard_occlusion_query(rsx::reports::occlusion_query_info* query)

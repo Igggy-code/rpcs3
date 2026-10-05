@@ -513,6 +513,20 @@ namespace mtl
 		return result;
 	}
 
+	bool occlusion_pending_submit(const occlusion_query& query)
+	{
+		for (u32 slot : query.slots)
+		{
+			id<MTLCommandBuffer> cmd = s_occlusion.users[slot];
+			if (cmd && cmd.status == MTLCommandBufferStatusNotEnqueued)
+			{
+				return true;
+			}
+		}
+
+		return false;
+	}
+
 	void occlusion_release(occlusion_query& query)
 	{
 		for (u32 slot : query.slots)
@@ -522,6 +536,8 @@ namespace mtl
 
 		query.slots.clear();
 		query.pass_generation = ~0ull;
+		query.recorded = 0;
+		query.skipped = false;
 	}
 
 	void draw(const draw_desc& desc)
@@ -591,6 +607,7 @@ namespace mtl
 					const u32 slot = q.slots.back();
 					s_occlusion.users[slot] = internal::command_buffer();
 					visibility_offset = static_cast<long long>(slot) * 8;
+					q.recorded++;
 				}
 			}
 
