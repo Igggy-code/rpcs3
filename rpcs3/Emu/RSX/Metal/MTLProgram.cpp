@@ -117,6 +117,24 @@ namespace mtl
 				}
 			}
 
+			~pipeline_compiler()
+			{
+				// Reached at process exit only if the renderer did not shut down (e.g. a hung RSX thread):
+				// never join here, a joinable std::thread would call std::terminate
+				{
+					std::lock_guard guard(lock);
+					stopping = true;
+					jobs.clear();
+				}
+
+				cv.notify_all();
+
+				for (auto& worker : workers)
+				{
+					if (worker.joinable()) worker.detach();
+				}
+			}
+
 			void stop()
 			{
 				{
