@@ -108,7 +108,10 @@ namespace mtl
 								busy++;
 							}
 
-							job();
+							{
+								mtl::autorelease_scope pool;
+								job();
+							}
 
 							std::lock_guard guard(lock);
 							busy--;

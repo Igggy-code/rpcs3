@@ -4,6 +4,11 @@
 #pragma clang diagnostic ignored "-Wold-style-cast"
 
 #import <Metal/Metal.h>
+#include <mach/mach.h>
+
+// Exported by libobjc (the functions behind @autoreleasepool); not declared in public headers
+extern "C" void* objc_autoreleasePoolPush(void);
+extern "C" void objc_autoreleasePoolPop(void* pool);
 
 #include <atomic>
 #include <cstdio>
@@ -272,6 +277,36 @@ namespace mtl
 			device_name = s_device.name.UTF8String;
 			return true;
 		}
+	}
+
+	void* autorelease_push()
+	{
+		return objc_autoreleasePoolPush();
+	}
+
+	void autorelease_pop(void* pool)
+	{
+		if (pool)
+		{
+			objc_autoreleasePoolPop(pool);
+		}
+	}
+
+	u64 device_allocated_bytes()
+	{
+		return s_device ? static_cast<u64>(s_device.currentAllocatedSize) : 0;
+	}
+
+	u64 process_footprint_bytes()
+	{
+		task_vm_info_data_t info{};
+		mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+		if (task_info(mach_task_self(), TASK_VM_INFO, reinterpret_cast<task_info_t>(&info), &count) != KERN_SUCCESS)
+		{
+			return 0;
+		}
+
+		return info.phys_footprint;
 	}
 
 	void shutdown_device()

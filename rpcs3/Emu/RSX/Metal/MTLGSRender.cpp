@@ -2,6 +2,8 @@
 #include "MTLGSRender.h"
 
 #include <cstdlib>
+
+#include "util/sysinfo.hpp"
 #include "MTLDebugDump.h"
 #include "MTLPresenter.h"
 
@@ -45,6 +47,8 @@ MTLGSRender::~MTLGSRender()
 void MTLGSRender::on_init_thread()
 {
 	GSRender::on_init_thread();
+
+	m_frame_pool = mtl::autorelease_push();
 
 	std::string device_name, error;
 
@@ -132,6 +136,7 @@ void MTLGSRender::on_exit()
 		mtl::shutdown_texture_ops();
 		mtl::shutdown_draw_resources();
 		mtl::destroy_presenter(std::exchange(m_presenter, nullptr));
+		mtl::autorelease_pop(std::exchange(m_frame_pool, nullptr));
 		mtl::shutdown_device();
 		m_device_ready = false;
 	}
@@ -303,6 +308,9 @@ void MTLGSRender::init_buffers(rsx::framebuffer_creation_context context)
 
 bool MTLGSRender::on_access_violation(u32 address, bool is_writing)
 {
+	// Usually called on SPU/PPU threads, which have no autorelease pool of their own
+	mtl::autorelease_scope pool;
+
 	rsx::mm_flush(address);
 
 	const bool can_flush = is_current_thread();
@@ -692,6 +700,26 @@ void MTLGSRender::flip(const rsx::display_flip_info_t& info)
 {
 	mtl::stall_probe probe("flip", 50'000);
 
+	// Memory diagnostics every ~10 s: the process has been killed silently (no crash report) after
+	// a few minutes of play, which points at memory exhaustion
+	if (const u64 now = get_system_time(); now - m_last_memory_report >= 10'000'000)
+	{
+		m_last_memory_report = now;
+		const auto [total, used] = utils::get_memory_usage();
+
+		u64 surface_count = 0, surface_bytes = 0;
+		m_rtts.for_each_surface([&](u32, mtl::render_target* surface)
+		{
+			surface_count++;
+			surface_bytes += u64{surface->width()} * surface->height() * surface->block_size();
+		});
+
+		rsx_log.notice("Metal: memory: process %u MB, Metal device %u MB, system free %u MB of %u MB, surfaces %u (%u MB), cached textures %u MB",
+			mtl::process_footprint_bytes() >> 20, mtl::device_allocated_bytes() >> 20,
+			(total - used) >> 20, total >> 20, surface_count, surface_bytes >> 20,
+			m_texture_cache.get_texture_memory_in_use() >> 20);
+	}
+
 	if (m_presenter && m_frame && !info.skip_frame)
 	{
 		if (m_vsync_mode != g_cfg.video.vsync)
@@ -805,6 +833,11 @@ void MTLGSRender::flip(const rsx::display_flip_info_t& info)
 	{
 		m_frame->flip(m_context);
 	}
+
+	// The RSX thread has no enclosing autorelease pool: drain what this frame autoreleased (command
+	// buffers, render pass descriptors...) and start a new pool for the next one
+	mtl::autorelease_pop(m_frame_pool);
+	m_frame_pool = mtl::autorelease_push();
 
 	rsx::thread::flip(info);
 }

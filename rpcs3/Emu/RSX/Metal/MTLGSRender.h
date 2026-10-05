@@ -142,6 +142,9 @@ private:
 	std::array<mtl::occlusion_query, rsx::reports::occlusion_query_count> m_occlusion_map;
 	rsx::reports::occlusion_query_info* m_active_query = nullptr;
 
+	u64 m_last_memory_report = 0;
+	void* m_frame_pool = nullptr; // RSX thread autorelease pool, drained every flip
+
 	void begin_occlusion_query(rsx::reports::occlusion_query_info* query) override;
 	void end_occlusion_query(rsx::reports::occlusion_query_info* query) override;
 	bool check_occlusion_query_status(rsx::reports::occlusion_query_info* query) override;

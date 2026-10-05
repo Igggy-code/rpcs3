@@ -193,6 +193,24 @@ namespace mtl
 	bool init_device(std::string& device_name, std::string& error);
 	void shutdown_device();
 
+	// Objective-C autorelease pool for C++ code paths. Threads without a pool keep every autoreleased
+	// object (command buffers and everything they reference) alive until the thread exits.
+	void* autorelease_push();
+	void autorelease_pop(void* pool);
+
+	struct autorelease_scope
+	{
+		void* pool = autorelease_push();
+		autorelease_scope() = default;
+		autorelease_scope(const autorelease_scope&) = delete;
+		autorelease_scope& operator=(const autorelease_scope&) = delete;
+		~autorelease_scope() { autorelease_pop(pool); }
+	};
+
+	// Memory diagnostics: bytes the Metal device has allocated, and this process' physical footprint
+	u64 device_allocated_bytes();
+	u64 process_footprint_bytes();
+
 	// Commands are recorded into one pending command buffer, committed by flush() or present.
 	void clear_color(texture& dst, const float rgba[4], u32 write_mask);
 	void clear_depth_stencil(texture& dst, bool clear_depth, float depth, bool clear_stencil, u8 stencil);
