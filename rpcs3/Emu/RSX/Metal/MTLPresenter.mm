@@ -277,6 +277,11 @@ namespace mtl
 				[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
 			}
 
+			if (params.draw_overlays)
+			{
+				params.draw_overlays((__bridge void*)enc);
+			}
+
 			[enc endEncoding];
 			[cmd presentDrawable:drawable];
 

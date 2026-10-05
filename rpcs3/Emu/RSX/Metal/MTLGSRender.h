@@ -4,6 +4,7 @@
 #include "MTLRenderTargets.h"
 #include "MTLProgram.h"
 #include "MTLTextureCache.h"
+#include "MTLOverlays.h"
 
 #include "Emu/Cell/timers.hpp"
 #include "Utilities/File.h"
@@ -177,6 +178,10 @@ private:
 	rsx::reports::occlusion_query_info* m_active_query = nullptr;
 
 	u64 m_last_memory_report = 0;
+
+	// Native overlays (RPCS3 UI drawn over the game image)
+	mtl::ui_overlay_renderer m_ui_renderer;
+	bool m_ui_renderer_ready = false;
 	void* m_frame_pool = nullptr; // RSX thread autorelease pool, drained every flip
 
 	// Hang watchdog: logs what the RSX thread is doing when no frame was presented for a while

@@ -9,6 +9,7 @@
 
 #include "Emu/IdManager.h"
 #include "Emu/System.h"
+#include "Emu/RSX/Overlays/overlay_manager.h"
 #include "Emu/Memory/vm.h"
 #include "Emu/Memory/vm_locking.h"
 #include "Emu/RSX/gcm_enums.h"
@@ -88,6 +89,8 @@ void MTLGSRender::on_init_thread()
 	// Build the transfer shaders now rather than in the middle of a frame
 	mtl::prepare_texture_ops();
 
+	m_ui_renderer_ready = m_ui_renderer.create();
+
 	if (mtl::shader_translation_available())
 	{
 		spirv::initialize_compiler_context();
@@ -146,6 +149,8 @@ void MTLGSRender::on_exit()
 		mtl::shutdown_texture_ops();
 		mtl::shutdown_draw_resources();
 		mtl::destroy_presenter(std::exchange(m_presenter, nullptr));
+		m_ui_renderer.destroy();
+		m_ui_renderer_ready = false;
 		mtl::autorelease_pop(std::exchange(m_frame_pool, nullptr));
 		mtl::shutdown_device();
 		m_device_ready = false;
@@ -710,6 +715,24 @@ void MTLGSRender::flip(const rsx::display_flip_info_t& info)
 {
 	mtl::stall_probe probe("flip", 50'000);
 
+	// Release the resources of overlays that were closed
+	if (m_overlay_manager && m_overlay_manager->has_dirty())
+	{
+		m_overlay_manager->lock_shared();
+
+		std::vector<u32> uids_to_dispose;
+		uids_to_dispose.reserve(m_overlay_manager->get_dirty().size());
+
+		for (const auto& view : m_overlay_manager->get_dirty())
+		{
+			m_ui_renderer.remove_temp_resources(view->uid);
+			uids_to_dispose.push_back(view->uid);
+		}
+
+		m_overlay_manager->unlock_shared();
+		m_overlay_manager->dispose(uids_to_dispose);
+	}
+
 	// Memory diagnostics every ~10 s: the process has been killed silently (no crash report) after
 	// a few minutes of play, which points at memory exhaustion
 	if (const u64 now = get_system_time(); now - m_last_memory_report >= 10'000'000)
@@ -793,13 +816,34 @@ void MTLGSRender::flip(const rsx::display_flip_info_t& info)
 		params.output_width = m_frame->client_width();
 		params.output_height = m_frame->client_height();
 
+		if (!width || !height)
+		{
+			width = avconfig.resolution_x;
+			height = avconfig.resolution_y;
+		}
+
+		const areau area = avconfig.aspect_convert_region({ width, height }, { params.output_width, params.output_height });
+
 		if (params.surface || params.pixels)
 		{
-			const areau area = avconfig.aspect_convert_region({ width, height }, { params.output_width, params.output_height });
 			params.viewport_x = area.x1;
 			params.viewport_y = area.y1;
 			params.viewport_width = area.width();
 			params.viewport_height = area.height();
+		}
+
+		// Native overlays (performance overlay, trophies, message dialogs...) over the game image
+		if (m_overlay_manager && m_overlay_manager->has_visible() && m_ui_renderer_ready)
+		{
+			params.draw_overlays = [this, area](void* encoder)
+			{
+				std::lock_guard lock(*m_overlay_manager);
+
+				for (const auto& view : m_overlay_manager->get_views())
+				{
+					m_ui_renderer.run(encoder, area, *view.get());
+				}
+			};
 		}
 
 		if (m_dump)

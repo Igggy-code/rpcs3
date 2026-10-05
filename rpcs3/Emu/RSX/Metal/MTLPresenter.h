@@ -4,6 +4,7 @@
 // Kept free of Objective-C and RPCS3 headers so both sides compile independently.
 
 #include <cstdint>
+#include <functional>
 #include <string>
 
 namespace mtl
@@ -31,6 +32,9 @@ namespace mtl
 		std::int32_t viewport_y = 0;
 		std::uint32_t viewport_width = 0;
 		std::uint32_t viewport_height = 0;
+
+		// Called with the drawable's id<MTLRenderCommandEncoder> (as void*) after the image is drawn
+		std::function<void(void* encoder)> draw_overlays;
 	};
 
 	// nsview: the NSView* of the game window (display_handle_t on macOS). Requires mtl::init_device().

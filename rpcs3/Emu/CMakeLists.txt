@@ -107,6 +107,7 @@ if(APPLE AND USE_METAL AND TARGET 3rdparty_vulkan)
         RSX/Metal/MTLGSRender.cpp
         RSX/Metal/MTLGSRenderDebug.cpp
         RSX/Metal/MTLGSRenderDraw.cpp
+        RSX/Metal/MTLOverlays.cpp
         RSX/Metal/MTLProgram.cpp
         RSX/Metal/MTLRenderTargets.cpp
         RSX/Metal/MTLShaderCompiler.cpp
@@ -114,10 +115,11 @@ if(APPLE AND USE_METAL AND TARGET 3rdparty_vulkan)
         RSX/Metal/MTLTextureCache.cpp
         RSX/Metal/MTLDevice.mm
         RSX/Metal/MTLDraw.mm
+        RSX/Metal/MTLOverlayDraw.mm
         RSX/Metal/MTLPresenter.mm
         RSX/Metal/MTLTextureOps.mm
     )
-    set_source_files_properties(RSX/Metal/MTLDevice.mm RSX/Metal/MTLDraw.mm RSX/Metal/MTLPresenter.mm RSX/Metal/MTLTextureOps.mm PROPERTIES
+    set_source_files_properties(RSX/Metal/MTLDevice.mm RSX/Metal/MTLDraw.mm RSX/Metal/MTLOverlayDraw.mm RSX/Metal/MTLPresenter.mm RSX/Metal/MTLTextureOps.mm PROPERTIES
         COMPILE_OPTIONS "-fobjc-arc"
         SKIP_PRECOMPILE_HEADERS ON
     )
