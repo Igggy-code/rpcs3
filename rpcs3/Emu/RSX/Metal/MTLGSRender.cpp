@@ -1,5 +1,7 @@
 #include "stdafx.h"
 #include "MTLGSRender.h"
+
+#include <cstdlib>
 #include "MTLDebugDump.h"
 #include "MTLPresenter.h"
 
@@ -54,8 +56,14 @@ void MTLGSRender::on_init_thread()
 
 	m_device_ready = true;
 
-	// Real ZCULL pixel counts (the default controller reports every query as visible with a bogus count)
-	zcull_ctrl.reset(static_cast<::rsx::reports::ZCULL_control*>(this));
+	// Real ZCULL pixel counts are experimental: in UC2 every report read waits for the GPU, which drops the
+	// menu to ~3 FPS and breaks rendering. Until reads can be served without stalling, keep the default
+	// controller (every query visible) unless RPCS3_METAL_ZCULL=1 is set.
+	if (const char* env = std::getenv("RPCS3_METAL_ZCULL"); env && env[0] == '1')
+	{
+		rsx_log.warning("Metal: experimental ZCULL occlusion queries enabled");
+		zcull_ctrl.reset(static_cast<::rsx::reports::ZCULL_control*>(this));
+	}
 
 	// Sampler descriptors are consulted by the program analysis; they are filled by the texture cache
 	for (auto& sampler : fs_sampler_state) sampler = std::make_unique<mtl::texture_cache::sampled_image_descriptor>();
