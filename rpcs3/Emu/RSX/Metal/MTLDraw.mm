@@ -424,6 +424,105 @@ namespace mtl
 		}
 	}
 
+	namespace
+	{
+		constexpr u32 occlusion_slot_count = 8192;
+
+		struct occlusion_pool
+		{
+			std::vector<u32> free_slots;
+			std::vector<id<MTLCommandBuffer>> users = std::vector<id<MTLCommandBuffer>>(occlusion_slot_count);
+			bool initialized = false;
+
+			void init()
+			{
+				if (initialized) return;
+				initialized = true;
+				free_slots.reserve(occlusion_slot_count);
+				for (u32 i = occlusion_slot_count; i-- > 0;) free_slots.push_back(i);
+			}
+		};
+
+		occlusion_pool s_occlusion;
+
+		bool slot_completed(u32 slot)
+		{
+			id<MTLCommandBuffer> cmd = s_occlusion.users[slot];
+			return !cmd || cmd.status >= MTLCommandBufferStatusCompleted;
+		}
+
+		u32 allocate_occlusion_slot()
+		{
+			s_occlusion.init();
+
+			// Reuse only slots the GPU is done with (a discarded query may still be in flight)
+			for (size_t i = s_occlusion.free_slots.size(); i-- > 0;)
+			{
+				const u32 slot = s_occlusion.free_slots[i];
+				if (slot_completed(slot))
+				{
+					s_occlusion.free_slots.erase(s_occlusion.free_slots.begin() + i);
+					s_occlusion.users[slot] = nil;
+					static_cast<u64*>(mtl::internal::visibility_buffer().contents)[slot] = 0;
+					return slot;
+				}
+			}
+
+			return ~0u;
+		}
+	}
+
+	bool occlusion_ready(const occlusion_query& query)
+	{
+		for (u32 slot : query.slots)
+		{
+			if (!slot_completed(slot)) return false;
+		}
+
+		return true;
+	}
+
+	u64 occlusion_result(const occlusion_query& query, bool precise)
+	{
+		@autoreleasepool
+		{
+			for (u32 slot : query.slots)
+			{
+				id<MTLCommandBuffer> cmd = s_occlusion.users[slot];
+				if (!cmd || cmd.status >= MTLCommandBufferStatusCompleted) continue;
+
+				if (cmd.status == MTLCommandBufferStatusNotEnqueued)
+				{
+					mtl::flush();
+				}
+
+				[cmd waitUntilCompleted];
+			}
+		}
+
+		const u64* data = static_cast<const u64*>(internal::visibility_buffer().contents);
+		u64 result = 0;
+
+		for (u32 slot : query.slots)
+		{
+			result += data[slot];
+			if (result && !precise) break;
+		}
+
+		return result;
+	}
+
+	void occlusion_release(occlusion_query& query)
+	{
+		for (u32 slot : query.slots)
+		{
+			s_occlusion.free_slots.push_back(slot);
+		}
+
+		query.slots.clear();
+		query.pass_generation = ~0ull;
+	}
+
 	void draw(const draw_desc& desc)
 	{
 		if (!desc.pipeline || !desc.pipeline->valid() || desc.ranges.empty() || !ensure_ring())
@@ -469,6 +568,32 @@ namespace mtl
 			{
 				return;
 			}
+
+			// Occlusion: count samples into the query's slot for this render pass
+			long long visibility_offset = -1;
+			if (desc.occlusion)
+			{
+				auto& q = *desc.occlusion;
+				const auto generation = internal::render_pass_generation();
+
+				if (q.slots.empty() || q.pass_generation != generation)
+				{
+					if (const u32 slot = allocate_occlusion_slot(); slot != ~0u)
+					{
+						q.slots.push_back(slot);
+						q.pass_generation = generation;
+					}
+				}
+
+				if (!q.slots.empty() && q.pass_generation == generation)
+				{
+					const u32 slot = q.slots.back();
+					s_occlusion.users[slot] = internal::command_buffer();
+					visibility_offset = static_cast<long long>(slot) * 8;
+				}
+			}
+
+			internal::set_visibility_offset(enc, visibility_offset);
 
 			[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)desc.pipeline->native()];
 			[enc setDepthStencilState:get_depth_stencil_state(desc.depth_stencil)];
@@ -583,6 +708,8 @@ namespace mtl
 
 	void shutdown_draw_resources()
 	{
+		s_occlusion = {};
+
 		@autoreleasepool
 		{
 			internal::close_render_pass();

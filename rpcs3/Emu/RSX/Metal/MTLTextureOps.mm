@@ -1104,6 +1104,7 @@ namespace mtl
 			const u32 sw = std::min(desc.width, width - sx);
 			const u32 sh = std::min(desc.height, height - sy);
 
+			internal::set_visibility_offset(enc, -1);
 			[enc setRenderPipelineState:pso];
 			[enc setDepthStencilState:ds_state];
 			[enc setStencilReferenceValue:desc.stencil_value];

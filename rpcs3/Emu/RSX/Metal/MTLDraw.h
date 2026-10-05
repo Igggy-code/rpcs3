@@ -165,7 +165,25 @@ namespace mtl
 
 		std::vector<resource_binding> bindings;
 		std::vector<draw_range> ranges;
+
+		// Occlusion query the draw counts samples for (nullptr = none)
+		struct occlusion_query* occlusion = nullptr;
 	};
+
+	// Occlusion query: one visibility-buffer slot per render pass the query spans (Metal writes one
+	// result per pass and offset). Results are summed when read.
+	struct occlusion_query
+	{
+		std::vector<u32> slots;
+		u64 pass_generation = ~0ull; // Render pass the last slot belongs to
+	};
+
+	// True when every slot has been written by the GPU (false while a slot's command buffer is pending)
+	bool occlusion_ready(const occlusion_query& query);
+	// Waits for the GPU if needed, then returns the sum of passed samples (stops at the first hit if !precise)
+	u64 occlusion_result(const occlusion_query& query, bool precise);
+	// Returns the slots to the pool
+	void occlusion_release(occlusion_query& query);
 
 	// Records the draw into the pending command buffer (reusing the open render pass when the
 	// attachments did not change)

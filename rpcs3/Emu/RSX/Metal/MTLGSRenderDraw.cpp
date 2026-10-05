@@ -1039,6 +1039,11 @@ void MTLGSRender::emit_draw(u32 sub_index, const draw_env& env)
 		}
 	}
 
+	if (m_active_query)
+	{
+		desc.occlusion = &m_occlusion_map[m_active_query->driver_handle];
+	}
+
 	mtl::draw(desc);
 	m_draws_submitted++;
 }

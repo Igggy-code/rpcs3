@@ -91,6 +91,44 @@ namespace mtl::internal
 
 	void report_gpu_error(const char* what);
 
+	id<MTLBuffer> s_visibility = nil;
+	unsigned long long s_render_pass_generation = 0;
+	long long s_visibility_offset = -1;
+
+	id<MTLBuffer> visibility_buffer()
+	{
+		if (!s_visibility && s_device)
+		{
+			s_visibility = [s_device newBufferWithLength:8192 * 8 options:MTLResourceStorageModeShared];
+			s_visibility.label = @"RSX occlusion results";
+		}
+
+		return s_visibility;
+	}
+
+	unsigned long long render_pass_generation()
+	{
+		return s_render_pass_generation;
+	}
+
+	void set_visibility_offset(id<MTLRenderCommandEncoder> enc, long long offset)
+	{
+		if (offset == s_visibility_offset)
+		{
+			return;
+		}
+
+		s_visibility_offset = offset;
+		if (offset < 0)
+		{
+			[enc setVisibilityResultMode:MTLVisibilityResultModeDisabled offset:0];
+		}
+		else
+		{
+			[enc setVisibilityResultMode:MTLVisibilityResultModeCounting offset:static_cast<NSUInteger>(offset)];
+		}
+	}
+
 	id<MTLCommandBuffer> command_buffer()
 	{
 		std::lock_guard lock(s_lock);
@@ -176,8 +214,12 @@ namespace mtl::internal
 			}
 		}
 
+		pass.visibilityResultBuffer = visibility_buffer();
+
 		s_encoder_depth = depth;
 		s_encoder = [command_buffer() renderCommandEncoderWithDescriptor:pass];
+		s_render_pass_generation++;
+		s_visibility_offset = -1;
 		s_encoder.label = @"RSX draws";
 		is_new = true;
 		return s_encoder;
@@ -256,6 +298,7 @@ namespace mtl
 			}
 
 			s_queue = nil;
+			internal::s_visibility = nil;
 			s_device = nil;
 		}
 	}

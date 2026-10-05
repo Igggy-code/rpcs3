@@ -31,6 +31,11 @@ MTLGSRender::MTLGSRender(utils::serial* ar) noexcept : GSRender(ar)
 
 MTLGSRender::~MTLGSRender()
 {
+	if (zcull_ctrl.get() == static_cast<::rsx::reports::ZCULL_control*>(this))
+	{
+		zcull_ctrl.release();
+	}
+
 	// Normally released in on_exit() on the RSX thread
 	mtl::destroy_presenter(std::exchange(m_presenter, nullptr));
 }
@@ -48,6 +53,9 @@ void MTLGSRender::on_init_thread()
 	}
 
 	m_device_ready = true;
+
+	// Real ZCULL pixel counts (the default controller reports every query as visible with a bogus count)
+	zcull_ctrl.reset(static_cast<::rsx::reports::ZCULL_control*>(this));
 
 	// Sampler descriptors are consulted by the program analysis; they are filled by the texture cache
 	for (auto& sampler : fs_sampler_state) sampler = std::make_unique<mtl::texture_cache::sampled_image_descriptor>();
@@ -89,6 +97,19 @@ void MTLGSRender::on_init_thread()
 
 void MTLGSRender::on_exit()
 {
+	if (zcull_ctrl.get() == static_cast<::rsx::reports::ZCULL_control*>(this))
+	{
+		// Queries live in device resources that are released below
+		for (auto& query : m_occlusion_map)
+		{
+			mtl::occlusion_release(query);
+		}
+
+		m_active_query = nullptr;
+		zcull_ctrl.release();
+		zcull_ctrl = std::make_unique<::rsx::reports::ZCULL_control>();
+	}
+
 	if (m_device_ready)
 	{
 		if (m_prog_buffer)
@@ -778,4 +799,61 @@ void MTLGSRender::flip(const rsx::display_flip_info_t& info)
 	}
 
 	rsx::thread::flip(info);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Occlusion queries
+// ---------------------------------------------------------------------------------------------
+
+void MTLGSRender::begin_occlusion_query(rsx::reports::occlusion_query_info* query)
+{
+	query->result = 0;
+	m_active_query = query;
+}
+
+void MTLGSRender::end_occlusion_query(rsx::reports::occlusion_query_info* query)
+{
+	if (m_active_query == query)
+	{
+		m_active_query = nullptr;
+	}
+}
+
+bool MTLGSRender::check_occlusion_query_status(rsx::reports::occlusion_query_info* query)
+{
+	if (!query->num_draws)
+	{
+		return true;
+	}
+
+	const auto& data = m_occlusion_map[query->driver_handle];
+	return data.slots.empty() || mtl::occlusion_ready(data);
+}
+
+void MTLGSRender::get_occlusion_query_result(rsx::reports::occlusion_query_info* query)
+{
+	auto& data = m_occlusion_map[query->driver_handle];
+
+	if (query->num_draws && !data.slots.empty())
+	{
+		if (!mtl::occlusion_ready(data))
+		{
+			rsx_log.trace("Metal: ZCULL read forced a GPU sync");
+		}
+
+		const u64 samples = mtl::occlusion_result(data, !!g_cfg.video.precise_zpass_count);
+		query->result += static_cast<u32>(std::min<u64>(samples, 0xffffffffu));
+	}
+
+	mtl::occlusion_release(data);
+}
+
+void MTLGSRender::discard_occlusion_query(rsx::reports::occlusion_query_info* query)
+{
+	if (m_active_query == query)
+	{
+		m_active_query = nullptr;
+	}
+
+	mtl::occlusion_release(m_occlusion_map[query->driver_handle]);
 }

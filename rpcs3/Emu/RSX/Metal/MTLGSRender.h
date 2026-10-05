@@ -63,7 +63,7 @@ namespace mtl
 // Programs are translated RSX -> GLSL (Vulkan decompilers) -> SPIR-V -> MSL. Draws pull vertex data
 // from texel buffers like the Vulkan backend; textures come from an rsx::texture_cache of Metal images.
 // See the "Metal backend" project notes for the roadmap.
-class MTLGSRender : public GSRender
+class MTLGSRender : public GSRender, public ::rsx::reports::ZCULL_control
 {
 public:
 	u64 get_cycles() final;
@@ -137,6 +137,16 @@ private:
 
 	shared_mutex m_queue_guard;
 	std::list<mtl::work_item> m_work_queue;
+
+	// Occlusion queries (ZCULL pixel counts), indexed by occlusion_query_info::driver_handle
+	std::array<mtl::occlusion_query, rsx::reports::occlusion_query_count> m_occlusion_map;
+	rsx::reports::occlusion_query_info* m_active_query = nullptr;
+
+	void begin_occlusion_query(rsx::reports::occlusion_query_info* query) override;
+	void end_occlusion_query(rsx::reports::occlusion_query_info* query) override;
+	bool check_occlusion_query_status(rsx::reports::occlusion_query_info* query) override;
+	void get_occlusion_query_result(rsx::reports::occlusion_query_info* query) override;
+	void discard_occlusion_query(rsx::reports::occlusion_query_info* query) override;
 
 	// Frame dump for debugging (MTLGSRenderDebug.cpp, see MTLDebugDump.h)
 	struct frame_dump

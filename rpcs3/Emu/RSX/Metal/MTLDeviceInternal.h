@@ -25,6 +25,12 @@ namespace mtl::internal
 	id<MTLRenderCommandEncoder> render_encoder(__unsafe_unretained const id<MTLTexture>* color, id<MTLTexture> depth, bool has_stencil, bool& is_new);
 	void close_render_pass();
 
+	// Visibility results: buffer attached to every draw render pass, generation of the open render pass,
+	// and a cached setVisibilityResultMode (offset < 0 disables counting)
+	id<MTLBuffer> visibility_buffer();
+	unsigned long long render_pass_generation();
+	void set_visibility_offset(id<MTLRenderCommandEncoder> enc, long long offset);
+
 	// Logs a GPU stall (command buffers not completing) through the RPCS3 log hook, once per second at most
 	void report_gpu_stall(const char* where);
 
